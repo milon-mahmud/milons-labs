@@ -1,4 +1,4 @@
-import type { SrtCue } from '../types/studio';
+import type { SrtCue } from '../types/studio.ts';
 
 export function secondsToSrtTimestamp(totalSeconds: number): string {
   const safe = Math.max(0, Number.isFinite(totalSeconds) ? totalSeconds : 0);

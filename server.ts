@@ -4,8 +4,8 @@ import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { buildSrtString, secondsToSrtTimestamp } from './src/utils/srt';
-import type { SrtCue } from './src/types/studio';
+import { buildSrtString, secondsToSrtTimestamp } from './src/utils/srt.ts';
+import type { SrtCue } from './src/types/studio.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +46,50 @@ function normalizeAudioMimeType(rawMime: string, originalName: string): string {
   return 'audio/mp3';
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429');
+}
+
+function parseRetrySeconds(rawMessage: string): number | null {
+  const match = rawMessage.match(/retry(?:\s+in)?\s+(\d+(?:\.\d+)?)s/i);
+  if (match) {
+    return Math.ceil(Number(match[1]));
+  }
+  const delayMatch = rawMessage.match(/"retryDelay"\s*:\s*"(\d+)s"/i);
+  if (delayMatch) {
+    return parseInt(delayMatch[1], 10);
+  }
+  return null;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRateLimitError(err) || attempt === maxRetries) {
+        throw err;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      const hintedSec = parseRetrySeconds(msg);
+      // Wait up to 12s automatically on short transient rate limits; longer limits fail fast with clear timer
+      if (hintedSec && hintedSec > 15) {
+        throw err;
+      }
+      const delayMs = hintedSec ? Math.min(12000, hintedSec * 1000 + 500) : (attempt + 1) * 3000;
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 function extractApiErrorMessage(err: unknown): { status: number; message: string } {
   const rawMessage = err instanceof Error ? err.message : String(err);
   if (rawMessage.includes('API_KEY_INVALID') || rawMessage.includes('400')) {
@@ -58,9 +102,13 @@ function extractApiErrorMessage(err: unknown): { status: number; message: string
     };
   }
   if (rawMessage.includes('RESOURCE_EXHAUSTED') || rawMessage.includes('429')) {
+    const retrySec = parseRetrySeconds(rawMessage);
+    const waitHint = retrySec
+      ? `Please wait about ${retrySec} seconds and try again.`
+      : 'Free-tier per-minute limit usually resets in 30–60 seconds. Please wait a moment and try again.';
     return {
       status: 429,
-      message: 'Rate limit reached. Please wait a few seconds and try again.',
+      message: `Rate limit reached. ${waitHint}`,
     };
   }
   if (rawMessage.includes('NOT_FOUND') || rawMessage.includes('404')) {
@@ -237,23 +285,25 @@ async function synthesizeSingleClip(params: {
     speechMetadata: { style: enhancedStyle },
   };
 
-  const response = await ai.models.generateContent({
-    model: chosenModel,
-    contents: [
-      {
-        role: 'user',
-        parts: [part],
-      },
-    ],
-    config: {
-      responseModalities: ['AUDIO'],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName },
+  const response = await withRetry(() =>
+    ai.models.generateContent({
+      model: chosenModel,
+      contents: [
+        {
+          role: 'user',
+          parts: [part],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName },
+          },
         },
       },
-    },
-  });
+    })
+  );
 
   const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
   if (!base64Audio) {
@@ -551,46 +601,51 @@ async function startServer() {
         });
 
         try {
-          const response = await ai.models.generateContent({
-            model: 'gemini-3.8-flash-tts',
-            contents: [{ role: 'user', parts }],
-            config: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                multiSpeakerVoiceConfig: {
-                  speakerVoiceConfigs: speakers.map((spk) => ({
-                    speaker: spk.name,
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        voiceName: spk.voiceName,
+          const response = await withRetry(() =>
+            ai.models.generateContent({
+              model: 'gemini-3.8-flash-tts',
+              contents: [{ role: 'user', parts }],
+              config: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  multiSpeakerVoiceConfig: {
+                    speakerVoiceConfigs: speakers.map((spk) => ({
+                      speaker: spk.name,
+                      voiceConfig: {
+                        prebuiltVoiceConfig: {
+                          voiceName: spk.voiceName,
+                        },
                       },
-                    },
-                  })),
+                    })),
+                  },
                 },
               },
-            },
-          });
+            })
+          );
 
           const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
           if (base64Audio) {
+            const cleaned = mergeWavBuffers([Buffer.from(base64Audio, 'base64')], 0);
             res.json({
-              audioBase64: base64Audio,
+              audioBase64: cleaned.toString('base64'),
               mimeType: 'audio/wav',
               modelUsed: 'gemini-3.8-flash-tts',
             });
             return;
           }
         } catch (nativeErr) {
+          if (isRateLimitError(nativeErr)) {
+            throw nativeErr;
+          }
           console.warn('Native dual-speaker fallback to stitched multi-speaker:', nativeErr);
         }
       }
 
-      // General 2–10 Speaker Studio path: synthesize each turn with its speaker's voice & style and stitch seamlessly
+      // General 2–10 Speaker Studio path: synthesize each turn with pacing & retry
       const speakerMap = new Map(speakers.map((s) => [s.name, s]));
       const clips: Buffer[] = new Array(validTurns.length);
 
-      // Process in batches of 3 to stay fast while respecting concurrency
-      const batchSize = 3;
+      const batchSize = 2;
       for (let i = 0; i < validTurns.length; i += batchSize) {
         const batch = validTurns.slice(i, i + batchSize);
         const results = await Promise.all(
@@ -608,6 +663,9 @@ async function startServer() {
         results.forEach((buf, offset) => {
           clips[i + offset] = buf;
         });
+        if (i + batchSize < validTurns.length) {
+          await sleep(350);
+        }
       }
 
       const merged = mergeWavBuffers(clips, 180);
@@ -651,7 +709,7 @@ async function startServer() {
       const ai = getAiClient('v1beta');
       const clips: Buffer[] = new Array(validSegments.length);
 
-      const batchSize = 3;
+      const batchSize = 2;
       for (let i = 0; i < validSegments.length; i += batchSize) {
         const batch = validSegments.slice(i, i + batchSize);
         const results = await Promise.all(
@@ -668,6 +726,9 @@ async function startServer() {
         results.forEach((buf, offset) => {
           clips[i + offset] = buf;
         });
+        if (i + batchSize < validSegments.length) {
+          await sleep(350);
+        }
       }
 
       const merged = mergeWavBuffers(clips, 110);
