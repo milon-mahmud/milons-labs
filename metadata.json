@@ -1,0 +1,6 @@
+{
+  "name": "VoxCraft Studio",
+  "description": "Free AI audio-to-SRT subtitle generator and expressive text-to-speech voice studio.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
