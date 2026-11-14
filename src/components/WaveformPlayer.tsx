@@ -121,7 +121,7 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
       const x = idx * slotWidth + (slotWidth - barWidth) / 2;
       const y = (height - barHeight) / 2;
 
-      ctx.fillStyle = barRatio <= progress ? '#2563EB' : '#CBD5E1';
+      ctx.fillStyle = barRatio <= progress ? '#09090B' : '#E4E4E7';
       ctx.beginPath();
       ctx.roundRect(x, y, barWidth, barHeight, 1.5);
       ctx.fill();
@@ -162,7 +162,7 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-4">
+    <div className="bg-white border border-zinc-200 rounded-xl p-4">
       <audio
         ref={audioRef}
         src={audioUrl}
@@ -186,15 +186,15 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
             type="button"
             onClick={togglePlay}
             aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
-            className="w-10 h-10 rounded-lg bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+            className="w-10 h-10 rounded-full bg-zinc-950 hover:bg-zinc-800 text-white flex items-center justify-center transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900 focus-visible:ring-offset-2"
           >
             {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
           </button>
           <div className="min-w-0">
-            <p className="text-sm font-medium text-slate-900 truncate">
+            <p className="text-sm font-medium text-zinc-950 truncate">
               {fileName || 'Audio Preview'}
             </p>
-            <p className="text-xs font-mono tabular-nums text-slate-500">
+            <p className="text-xs font-mono tabular-nums text-zinc-500">
               {formatDisplayTime(currentTime)} / {formatDisplayTime(duration)}
             </p>
           </div>
@@ -204,19 +204,19 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
           <button
             type="button"
             onClick={cycleRate}
-            className="px-2.5 py-1.5 text-xs font-mono tabular-nums font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+            className="px-2.5 py-1.5 text-xs font-mono tabular-nums font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
             title="Change playback speed"
           >
             {playbackRate}x
           </button>
-          <div className="hidden sm:flex items-center gap-1 text-slate-400 px-1">
+          <div className="hidden sm:flex items-center gap-1 text-zinc-400 px-1">
             <Volume2 className="w-4 h-4" />
           </div>
           {onDownload && (
             <button
               type="button"
               onClick={onDownload}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-900 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{downloadLabel}</span>
@@ -228,7 +228,7 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
       <canvas
         ref={canvasRef}
         onClick={handleCanvasClick}
-        className="w-full h-14 cursor-pointer rounded-md bg-slate-50 border border-slate-100"
+        className="w-full h-14 cursor-pointer rounded-lg bg-zinc-50 border border-zinc-100"
         title="Click anywhere on the waveform to seek"
       />
     </div>

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { buildSrtString, secondsToSrtTimestamp } from './src/utils/srt.ts';
+import { extractEmotionTags } from './src/utils/scriptParser.ts';
 import type { SrtCue } from './src/types/studio.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,11 +14,43 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
-function getAiClient(apiVersion = 'v1beta'): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server.');
+const keyCooldownUntil = new Map<string, number>();
+let keyRoundRobinCursor = 0;
+
+function getConfiguredGeminiKeys(): string[] {
+  const candidates: string[] = [];
+
+  const multi = process.env.GEMINI_API_KEYS;
+  if (multi) {
+    multi
+      .split(/[,;\n\r]+/)
+      .map((k) => k.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean)
+      .forEach((k) => candidates.push(k));
   }
+
+  if (process.env.GEMINI_API_KEY) {
+    candidates.push(process.env.GEMINI_API_KEY.trim());
+  }
+
+  for (let i = 1; i <= 25; i++) {
+    const k = process.env[`GEMINI_API_KEY_${i}`];
+    if (k) candidates.push(k.trim());
+  }
+
+  const seen = new Set<string>();
+  const valid: string[] = [];
+  for (const k of candidates) {
+    if (!k || k === 'MY_GEMINI_API_KEY' || k.startsWith('MY_GEMINI_KEY_')) continue;
+    if (!seen.has(k)) {
+      seen.add(k);
+      valid.push(k);
+    }
+  }
+  return valid;
+}
+
+function createClientForKey(apiKey: string, apiVersion = 'v1beta'): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     apiVersion,
@@ -55,6 +88,11 @@ function isRateLimitError(err: unknown): boolean {
   return msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429');
 }
 
+function isKeyAuthError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('API_KEY_INVALID') || msg.includes('PERMISSION_DENIED') || msg.includes('403');
+}
+
 function parseRetrySeconds(rawMessage: string): number | null {
   const match = rawMessage.match(/retry(?:\s+in)?\s+(\d+(?:\.\d+)?)s/i);
   if (match) {
@@ -67,26 +105,64 @@ function parseRetrySeconds(rawMessage: string): number | null {
   return null;
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+async function runWithKeyRotation<T>(
+  fn: (ai: GoogleGenAI) => Promise<T>,
+  apiVersion = 'v1beta'
+): Promise<T> {
+  const keys = getConfiguredGeminiKeys();
+  if (keys.length === 0) {
+    throw new Error('GEMINI_API_KEY is not configured on the server.');
+  }
+
+  const now = Date.now();
+  const rotated = keys.map((_, idx) => keys[(keyRoundRobinCursor + idx) % keys.length]);
+  keyRoundRobinCursor = (keyRoundRobinCursor + 1) % keys.length;
+
+  const healthy = rotated.filter((k) => (keyCooldownUntil.get(k) || 0) <= now);
+  const orderedKeys =
+    healthy.length > 0
+      ? healthy
+      : [...rotated].sort(
+          (a, b) => (keyCooldownUntil.get(a) || 0) - (keyCooldownUntil.get(b) || 0)
+        );
+
   let lastErr: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+
+  for (let i = 0; i < orderedKeys.length; i++) {
+    const key = orderedKeys[i];
+    const ai = createClientForKey(key, apiVersion);
     try {
-      return await fn();
+      return await fn(ai);
     } catch (err) {
       lastErr = err;
-      if (!isRateLimitError(err) || attempt === maxRetries) {
-        throw err;
-      }
       const msg = err instanceof Error ? err.message : String(err);
-      const hintedSec = parseRetrySeconds(msg);
-      // Wait up to 12s automatically on short transient rate limits; longer limits fail fast with clear timer
-      if (hintedSec && hintedSec > 15) {
+
+      if (isRateLimitError(err)) {
+        const hintedSec = parseRetrySeconds(msg);
+        const cooldownMs = hintedSec ? Math.min(120_000, hintedSec * 1000) : 45_000;
+        keyCooldownUntil.set(key, Date.now() + cooldownMs);
+
+        // If more keys remain, fail over immediately to the next key
+        if (i < orderedKeys.length - 1) {
+          continue;
+        }
+        // Only 1 key (or last key) and short wait hinted: do one brief retry
+        if (hintedSec && hintedSec <= 12) {
+          await sleep(hintedSec * 1000 + 500);
+          return await fn(ai);
+        }
         throw err;
       }
-      const delayMs = hintedSec ? Math.min(12000, hintedSec * 1000 + 500) : (attempt + 1) * 3000;
-      await sleep(delayMs);
+
+      if (isKeyAuthError(err) && i < orderedKeys.length - 1) {
+        keyCooldownUntil.set(key, Date.now() + 300_000);
+        continue;
+      }
+
+      throw err;
     }
   }
+
   throw lastErr;
 }
 
@@ -103,9 +179,28 @@ function extractApiErrorMessage(err: unknown): { status: number; message: string
   }
   if (rawMessage.includes('RESOURCE_EXHAUSTED') || rawMessage.includes('429')) {
     const retrySec = parseRetrySeconds(rawMessage);
+    const isDaily =
+      rawMessage.includes('PerDay') ||
+      rawMessage.includes('RPD') ||
+      rawMessage.toLowerCase().includes('daily') ||
+      (retrySec !== null && retrySec > 180);
+
+    if (isDaily) {
+      const timeHint =
+        retrySec && retrySec >= 3600
+          ? `about ${Math.round(retrySec / 3600)}h`
+          : retrySec && retrySec > 180
+            ? `about ${Math.ceil(retrySec / 60)} min`
+            : 'at midnight US Pacific Time';
+      return {
+        status: 429,
+        message: `Daily free-tier quota reached across your configured API key(s) (resets in ${timeHint}). Add extra keys in GEMINI_API_KEYS or switch to Standard (Fast) mode for higher daily quota.`,
+      };
+    }
+
     const waitHint = retrySec
       ? `Please wait about ${retrySec} seconds and try again.`
-      : 'Free-tier per-minute limit usually resets in 30–60 seconds. Please wait a moment and try again.';
+      : 'Per-minute rate limit usually resets in 30–60 seconds. Please wait a moment and try again.';
     return {
       status: 429,
       message: `Rate limit reached. ${waitHint}`,
@@ -129,39 +224,41 @@ function extractCleanWavData(wavBuffer: Buffer): {
   let sampleRate = 24000;
   let numChannels = 1;
   let bitsPerSample = 16;
+  let pcm: Buffer;
 
   if (
     wavBuffer.length < 44 ||
     wavBuffer.toString('ascii', 0, 4) !== 'RIFF' ||
     wavBuffer.toString('ascii', 8, 12) !== 'WAVE'
   ) {
-    return { pcm: Buffer.from(wavBuffer), sampleRate, numChannels, bitsPerSample };
-  }
+    // Raw L16 PCM returned by Gemini 2.5 TTS models
+    pcm = Buffer.from(wavBuffer);
+  } else {
+    let dataOffset = 44;
+    let dataSize = Math.max(0, wavBuffer.length - 44);
+    let offset = 12;
 
-  let dataOffset = 44;
-  let dataSize = Math.max(0, wavBuffer.length - 44);
-  let offset = 12;
+    while (offset + 8 <= wavBuffer.length) {
+      const chunkId = wavBuffer.toString('ascii', offset, offset + 4);
+      const chunkSize = wavBuffer.readUInt32LE(offset + 4);
+      const payloadStart = offset + 8;
 
-  while (offset + 8 <= wavBuffer.length) {
-    const chunkId = wavBuffer.toString('ascii', offset, offset + 4);
-    const chunkSize = wavBuffer.readUInt32LE(offset + 4);
-    const payloadStart = offset + 8;
+      if (chunkId === 'fmt ' && payloadStart + 16 <= wavBuffer.length) {
+        numChannels = wavBuffer.readUInt16LE(payloadStart + 2) || 1;
+        sampleRate = wavBuffer.readUInt32LE(payloadStart + 4) || 24000;
+        bitsPerSample = wavBuffer.readUInt16LE(payloadStart + 14) || 16;
+      } else if (chunkId === 'data') {
+        dataOffset = payloadStart;
+        dataSize = Math.min(chunkSize, wavBuffer.length - payloadStart);
+        break;
+      }
 
-    if (chunkId === 'fmt ' && payloadStart + 16 <= wavBuffer.length) {
-      numChannels = wavBuffer.readUInt16LE(payloadStart + 2) || 1;
-      sampleRate = wavBuffer.readUInt32LE(payloadStart + 4) || 24000;
-      bitsPerSample = wavBuffer.readUInt16LE(payloadStart + 14) || 16;
-    } else if (chunkId === 'data') {
-      dataOffset = payloadStart;
-      dataSize = Math.min(chunkSize, wavBuffer.length - payloadStart);
-      break;
+      offset = payloadStart + chunkSize + (chunkSize % 2);
     }
 
-    offset = payloadStart + chunkSize + (chunkSize % 2);
+    // Copy only the pure audio PCM bytes (excludes C2PA or any trailing metadata chunks)
+    pcm = Buffer.from(wavBuffer.subarray(dataOffset, dataOffset + dataSize));
   }
-
-  // Copy only the pure audio PCM bytes (excludes C2PA or any trailing metadata chunks)
-  const pcm = Buffer.from(wavBuffer.subarray(dataOffset, dataOffset + dataSize));
 
   // Apply smooth 15ms fade-in and fade-out on 16-bit PCM to eliminate clicks/pops at boundaries
   if (bitsPerSample === 16 && pcm.length >= 4) {
@@ -244,72 +341,204 @@ function containsBengali(text: string): boolean {
   return /[\u0980-\u09FF]/.test(text);
 }
 
-function enhanceSpeechDelivery(text: string, style?: string): {
+function splitScriptIntoChunks(text: string, maxChars = 2200): string[] {
+  const cleaned = text.trim();
+  if (cleaned.length <= maxChars) return [cleaned];
+
+  const sentences = cleaned.split(/(?<=[।.!?])\s+|\n+/);
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const sentence of sentences) {
+    const s = sentence.trim();
+    if (!s) continue;
+    if (current && current.length + s.length + 1 > maxChars) {
+      chunks.push(current.trim());
+      current = s;
+    } else {
+      current = current ? `${current} ${s}` : s;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.length > 0 ? chunks : [cleaned];
+}
+
+function enhanceSpeechDelivery(
+  text: string,
+  style?: string,
+  emotionHint?: string
+): {
   cleanText: string;
   enhancedStyle: string;
   hasBangla: boolean;
 } {
-  const hasBangla = containsBengali(text);
-  // Normalize Bengali dari punctuation spacing cleanly without altering vocal tags
-  const cleanText = text.replace(/।\s*/g, '। ').replace(/\s{2,}/g, ' ').trim();
-  const baseStyle = style?.trim() || 'Natural conversational delivery';
+  // Strip accidental speaker prefix (e.g. "[ন্যারেটর]:" or "রিমি:") and [scene]/[emotion] tags
+  const withoutSpeakerPrefix = text.replace(
+    /^\s*(?:\[[^\]]+\]\s*:|[\p{L}\p{N}_\-\s]{1,28}:)\s*/u,
+    ''
+  );
+  const { cleanText: tagStripped, emotions } = extractEmotionTags(withoutSpeakerPrefix);
+
+  const hasBangla = containsBengali(tagStripped);
+  // Normalize Bengali dari and ellipsis spacing for natural human breath cadence
+  const cleanText = tagStripped
+    .replace(/।\s*/g, '। ')
+    .replace(/\.{3}\s*/g, '... ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  const styleParts = [
+    style?.trim() || 'Natural conversational delivery',
+    emotionHint?.trim(),
+    ...emotions,
+  ].filter(Boolean);
+  const combinedBase = Array.from(new Set(styleParts)).join('. ');
 
   if (hasBangla) {
     return {
       cleanText,
-      enhancedStyle: `${baseStyle}. Native fluent Bengali speaker, crystal-clear Bangla diction, clean studio microphone quality with zero background noise or throat artifacts, warm human intonation, never robotic`,
+      enhancedStyle: `${combinedBase}. Fluent native Bengali speaker delivering Shuddho, natural, soulful Bangla with crystal-clear pronunciation, warm human intonation, lifelike cadence, and studio condenser clarity`,
       hasBangla: true,
     };
   }
 
   return {
     cleanText,
-    enhancedStyle: `${baseStyle}. Clean studio microphone quality with zero background noise or throat artifacts, natural human intonation and warm conversational phrasing, never robotic`,
+    enhancedStyle: `${combinedBase}. Clean studio condenser clarity, warm human intonation, natural expressive phrasing and lifelike cadence`,
     hasBangla: false,
   };
 }
 
+type SupportedTtsModel =
+  | 'gemini-3.8-flash-tts'
+  | 'gemini-3.8-flash-lite-tts'
+  | 'gemini-2.5-flash-preview-tts'
+  | 'gemini-2.5-pro-preview-tts';
+
+const TTS_FALLBACK_ORDER: SupportedTtsModel[] = [
+  'gemini-3.8-flash-tts',
+  'gemini-3.8-flash-lite-tts',
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-pro-preview-tts',
+];
+
+function adaptTextFor25Tts(text: string): string {
+  return text
+    .replace(/<breath>/gi, ', ')
+    .replace(/<laugh>/gi, ' (laughs lightly) ')
+    .replace(/<gasp>/gi, ' (gasps softly) ')
+    .replace(/\|mhm\|/gi, 'mhm, ')
+    .replace(/\|yeah\|/gi, 'yeah, ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 async function synthesizeSingleClip(params: {
-  ai: GoogleGenAI;
-  model: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts';
+  model: SupportedTtsModel;
+  allowQuotaFallback?: boolean;
   text: string;
   voiceName: string;
   style?: string;
-}): Promise<Buffer> {
-  const { ai, model, text, voiceName, style } = params;
-  const { cleanText, enhancedStyle, hasBangla } = enhanceSpeechDelivery(text, style);
-  const chosenModel = hasBangla ? 'gemini-3.8-flash-tts' : model;
+  emotionHint?: string;
+}): Promise<{ wav: Buffer; modelUsed: string }> {
+  const { model, allowQuotaFallback = true, text, voiceName, style, emotionHint } = params;
+  const { cleanText, enhancedStyle } = enhanceSpeechDelivery(text, style, emotionHint);
 
-  const part: { text: string; speechMetadata?: { style: string } } = {
-    text: cleanText,
-    speechMetadata: { style: enhancedStyle },
-  };
+  if (!cleanText) {
+    throw new Error('Script line contains no speakable text after removing labels.');
+  }
 
-  const response = await withRetry(() =>
-    ai.models.generateContent({
-      model: chosenModel,
-      contents: [
-        {
-          role: 'user',
-          parts: [part],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName },
+  const callModel = async (targetModel: SupportedTtsModel) => {
+    const is25Model = targetModel.startsWith('gemini-2.5-');
+    const contentsPayload = is25Model
+      ? `Read the following script aloud naturally in this voice direction (${enhancedStyle}). Speak ONLY the script text itself:\n\n${adaptTextFor25Tts(cleanText)}`
+      : [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: cleanText,
+                speechMetadata: { style: enhancedStyle },
+              },
+            ],
+          },
+        ];
+
+    const response = await runWithKeyRotation((ai) =>
+      ai.models.generateContent({
+        model: targetModel,
+        contents: contentsPayload,
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
           },
         },
-      },
-    })
-  );
+      })
+    );
 
-  const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Audio) {
-    throw new Error('Voice engine did not return audio data.');
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) {
+      throw new Error('Voice engine did not return audio data.');
+    }
+    return {
+      wav: mergeWavBuffers([Buffer.from(base64Audio, 'base64')], 0),
+      modelUsed: targetModel,
+    };
+  };
+
+  if (!allowQuotaFallback) {
+    return await callModel(model);
   }
-  return mergeWavBuffers([Buffer.from(base64Audio, 'base64')], 0);
+
+  const candidates = [model, ...TTS_FALLBACK_ORDER.filter((m) => m !== model)];
+  let lastErr: unknown;
+  for (let i = 0; i < candidates.length; i++) {
+    const target = candidates[i];
+    try {
+      return await callModel(target);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const isRecoverableModelSwitch = isRateLimitError(err) || msg.includes('NOT_FOUND') || msg.includes('404');
+      if (isRecoverableModelSwitch && i < candidates.length - 1) {
+        console.warn(`TTS model ${target} unavailable/rate-limited, failing over to ${candidates[i + 1]}`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+function resolveTtsModelSelection(body: {
+  ttsModel?: unknown;
+  mode?: unknown;
+}): {
+  model: SupportedTtsModel;
+  allowQuotaFallback: boolean;
+} {
+  const requested = String(body.ttsModel || '').trim();
+  if (requested === 'gemini-3.8-flash-lite-tts') {
+    return { model: 'gemini-3.8-flash-lite-tts', allowQuotaFallback: false };
+  }
+  if (requested === 'gemini-3.8-flash-tts') {
+    return { model: 'gemini-3.8-flash-tts', allowQuotaFallback: false };
+  }
+  if (requested === 'gemini-2.5-flash-preview-tts') {
+    return { model: 'gemini-2.5-flash-preview-tts', allowQuotaFallback: false };
+  }
+  if (requested === 'gemini-2.5-pro-preview-tts') {
+    return { model: 'gemini-2.5-pro-preview-tts', allowQuotaFallback: false };
+  }
+  if (requested === 'auto') {
+    return { model: 'gemini-3.8-flash-tts', allowQuotaFallback: true };
+  }
+  return body.mode === 'standard'
+    ? { model: 'gemini-3.8-flash-lite-tts', allowQuotaFallback: false }
+    : { model: 'gemini-3.8-flash-tts', allowQuotaFallback: true };
 }
 
 const upload = multer({
@@ -339,11 +568,14 @@ async function startServer() {
       const sourceLanguage = String(req.body.language || 'auto').trim();
       const translateTo = String(req.body.translateTo || 'none').trim();
       const maxCharsPerLine = Math.min(84, Math.max(20, Number(req.body.maxCharsPerLine) || 42));
+      const srtModelChoice =
+        String(req.body.srtModel || '').trim() === 'gemini-3.5-transcribe'
+          ? 'gemini-3.5-transcribe'
+          : 'gemini-4-hydrogen';
 
       const mimeType = normalizeAudioMimeType(file.mimetype, file.originalname);
       const base64Audio = file.buffer.toString('base64');
 
-      const ai = getAiClient('v1beta');
       const audioPart = {
         inlineData: {
           mimeType,
@@ -361,22 +593,47 @@ async function startServer() {
           ? `Translate all subtitle cue text naturally into ${translateTo} while keeping exact audio timing.`
           : 'Keep the subtitle text in the exact original spoken language.';
 
+      let verbatimTranscriptHint = '';
+      if (srtModelChoice === 'gemini-3.5-transcribe') {
+        const transcribeResp = await runWithKeyRotation((ai) =>
+          ai.models.generateContent({
+            model: 'gemini-3.5-transcribe',
+            contents: {
+              parts: [
+                audioPart,
+                {
+                  text: `Provide an accurate verbatim transcript of this audio. ${langDirective}`,
+                },
+              ],
+            },
+          })
+        );
+        const transcriptText = (transcribeResp.text ?? '').trim();
+        if (transcriptText) {
+          verbatimTranscriptHint = `Use this verbatim transcript as your exact wording reference while syncing audio timestamps: """${transcriptText}"""`;
+        }
+      }
+
       const prompt = [
         'Transcribe this audio into tightly synchronized subtitle cues in a single fast pass.',
         langDirective,
         translateDirective,
+        verbatimTranscriptHint,
         `Split speech into natural subtitle segments of roughly ${maxCharsPerLine} characters max per cue.`,
         'Ensure startSeconds and endSeconds are accurate and strictly increasing.',
-      ].join(' ');
+      ]
+        .filter(Boolean)
+        .join(' ');
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: {
-          parts: [audioPart, { text: prompt }],
-        },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
+      const response = await runWithKeyRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: {
+            parts: [audioPart, { text: prompt }],
+          },
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
@@ -409,7 +666,8 @@ async function startServer() {
             required: ['cues'],
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim()) as {
         detectedLanguage?: string;
@@ -448,7 +706,7 @@ async function startServer() {
         srtText: buildSrtString(cues),
         detectedLanguage,
         rawTranscript: cues.map((c) => c.text).join(' '),
-        modelUsed: 'gemini-4-hydrogen',
+        modelUsed: srtModelChoice,
       });
     } catch (err) {
       const { status, message } = extractApiErrorMessage(err);
@@ -456,34 +714,45 @@ async function startServer() {
     }
   });
 
-  // Single-Speaker TTS & Prompt-Based Voice Design
+  // Single-Speaker TTS & Prompt-Based Voice Design (with long-script auto-chunking)
   app.post('/api/tts/single', async (req: Request, res: Response) => {
     try {
       const text = String(req.body.text || '').trim();
       const voiceName = String(req.body.voiceName || 'Kore').trim();
       const style = String(req.body.style || '').trim();
-      const mode = req.body.mode === 'expressive' ? 'expressive' : 'standard';
 
       if (!text) {
         res.status(400).json({ error: 'Please enter script text to generate speech.' });
         return;
       }
 
-      const ai = getAiClient('v1beta');
-      const model = mode === 'expressive' ? 'gemini-3.8-flash-tts' : 'gemini-3.8-flash-lite-tts';
+      const { model, allowQuotaFallback } = resolveTtsModelSelection(req.body);
 
-      const wavBuffer = await synthesizeSingleClip({
-        ai,
-        model,
-        text,
-        voiceName,
-        style,
-      });
+      const textChunks = splitScriptIntoChunks(text, 2200);
+      const wavParts: Buffer[] = [];
+      let actualModelUsed: string = model;
+
+      for (let i = 0; i < textChunks.length; i++) {
+        const result = await synthesizeSingleClip({
+          model,
+          allowQuotaFallback,
+          text: textChunks[i],
+          voiceName,
+          style,
+        });
+        wavParts.push(result.wav);
+        actualModelUsed = result.modelUsed;
+        if (i < textChunks.length - 1) {
+          await sleep(250);
+        }
+      }
+
+      const finalWav = wavParts.length === 1 ? wavParts[0] : mergeWavBuffers(wavParts, 140);
 
       res.json({
-        audioBase64: wavBuffer.toString('base64'),
+        audioBase64: finalWav.toString('base64'),
         mimeType: 'audio/wav',
-        modelUsed: model,
+        modelUsed: actualModelUsed,
       });
     } catch (err) {
       const { status, message } = extractApiErrorMessage(err);
@@ -500,22 +769,22 @@ async function startServer() {
         return;
       }
 
-      const ai = getAiClient('v1beta');
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: [
-          'Pick the best matching prebuilt base voice for this voice design prompt and refine a concise TTS acting direction.',
-          'Available voices:',
-          '- Kore (Female, clear, balanced studio voice)',
-          '- Zephyr (Female, soft, warm, gentle conversational voice)',
-          '- Puck (Male, bright, youthful, energetic voice)',
-          '- Charon (Male, deep, grounded, authoritative voice)',
-          '- Fenrir (Male, bold, textured, resonant dramatic voice)',
-          `\nUser voice design prompt: "${prompt}"`,
-        ].join('\n'),
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
+      const response = await runWithKeyRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: [
+            'Pick the best matching prebuilt base voice for this voice design prompt and refine a concise TTS acting direction.',
+            'Available voices:',
+            '- Kore (Female, clear, balanced studio voice)',
+            '- Zephyr (Female, soft, warm, gentle conversational voice)',
+            '- Puck (Male, bright, youthful, energetic voice)',
+            '- Charon (Male, deep, grounded, authoritative voice)',
+            '- Fenrir (Male, bold, textured, resonant dramatic voice)',
+            `\nUser voice design prompt: "${prompt}"`,
+          ].join('\n'),
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
@@ -535,7 +804,8 @@ async function startServer() {
             required: ['baseVoice', 'refinedStyle', 'label'],
           },
         },
-      });
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim()) as {
         baseVoice?: string;
@@ -565,7 +835,12 @@ async function startServer() {
         voiceName: string;
         style?: string;
       }>;
-      const turns = req.body.turns as Array<{ speaker: string; text: string }>;
+      const turns = req.body.turns as Array<{
+        speaker: string;
+        text: string;
+        emotionHint?: string;
+      }>;
+      const { model: preferredModel, allowQuotaFallback } = resolveTtsModelSelection(req.body);
 
       if (!Array.isArray(speakers) || speakers.length < 2 || speakers.length > 10) {
         res.status(400).json({ error: 'Please configure between 2 and 10 speakers.' });
@@ -583,67 +858,76 @@ async function startServer() {
         return;
       }
 
-      const ai = getAiClient('v1beta');
+      const speakerMap = new Map(speakers.map((s) => [s.name, s]));
+      const activeSpeakerNames = Array.from(new Set(validTurns.map((t) => t.speaker)));
+      const activeSpeakers = activeSpeakerNames
+        .map((name) => speakerMap.get(name))
+        .filter((s): s is { name: string; voiceName: string; style?: string } => Boolean(s));
 
-      // Fast path: when exactly 2 distinct speakers are used and <= 8 turns, try native multiSpeakerVoiceConfig
-      if (speakers.length === 2) {
-        const speakerMap = new Map(speakers.map((s) => [s.name, s]));
-        const parts = validTurns.map((turn) => {
-          const spk = speakerMap.get(turn.speaker) ?? speakers[0];
-          const { cleanText, enhancedStyle } = enhanceSpeechDelivery(turn.text, spk.style);
-          return {
-            text: `${spk.name}: ${cleanText}`,
-            speechMetadata: {
-              speaker: spk.name,
-              style: enhancedStyle,
-            },
-          };
-        });
+      // Fast path: when exactly 2 distinct speakers appear in turns and Flash Expressive is active, use 1-call native multiSpeakerVoiceConfig
+      if (activeSpeakers.length === 2 && preferredModel === 'gemini-3.8-flash-tts') {
+        const parts = validTurns
+          .map((turn) => {
+            const spk = speakerMap.get(turn.speaker) ?? activeSpeakers[0];
+            const { cleanText, enhancedStyle } = enhanceSpeechDelivery(
+              turn.text,
+              spk.style,
+              turn.emotionHint
+            );
+            if (!cleanText) return null;
+            return {
+              text: `${spk.name}: ${cleanText}`,
+              speechMetadata: {
+                speaker: spk.name,
+                style: enhancedStyle,
+              },
+            };
+          })
+          .filter((p): p is NonNullable<typeof p> => p !== null);
 
-        try {
-          const response = await withRetry(() =>
-            ai.models.generateContent({
-              model: 'gemini-3.8-flash-tts',
-              contents: [{ role: 'user', parts }],
-              config: {
-                responseModalities: ['AUDIO'],
-                speechConfig: {
-                  multiSpeakerVoiceConfig: {
-                    speakerVoiceConfigs: speakers.map((spk) => ({
-                      speaker: spk.name,
-                      voiceConfig: {
-                        prebuiltVoiceConfig: {
-                          voiceName: spk.voiceName,
+        if (parts.length > 0) {
+          try {
+            const response = await runWithKeyRotation((ai) =>
+              ai.models.generateContent({
+                model: 'gemini-3.8-flash-tts',
+                contents: [{ role: 'user', parts }],
+                config: {
+                  responseModalities: ['AUDIO'],
+                  speechConfig: {
+                    multiSpeakerVoiceConfig: {
+                      speakerVoiceConfigs: activeSpeakers.map((spk) => ({
+                        speaker: spk.name,
+                        voiceConfig: {
+                          prebuiltVoiceConfig: {
+                            voiceName: spk.voiceName,
+                          },
                         },
-                      },
-                    })),
+                      })),
+                    },
                   },
                 },
-              },
-            })
-          );
+              })
+            );
 
-          const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-          if (base64Audio) {
-            const cleaned = mergeWavBuffers([Buffer.from(base64Audio, 'base64')], 0);
-            res.json({
-              audioBase64: cleaned.toString('base64'),
-              mimeType: 'audio/wav',
-              modelUsed: 'gemini-3.8-flash-tts',
-            });
-            return;
+            const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (base64Audio) {
+              const cleaned = mergeWavBuffers([Buffer.from(base64Audio, 'base64')], 0);
+              res.json({
+                audioBase64: cleaned.toString('base64'),
+                mimeType: 'audio/wav',
+                modelUsed: 'gemini-3.8-flash-tts',
+              });
+              return;
+            }
+          } catch (nativeErr) {
+            console.warn('Native dual-speaker fallback to stitched multi-speaker:', nativeErr);
           }
-        } catch (nativeErr) {
-          if (isRateLimitError(nativeErr)) {
-            throw nativeErr;
-          }
-          console.warn('Native dual-speaker fallback to stitched multi-speaker:', nativeErr);
         }
       }
 
-      // General 2–10 Speaker Studio path: synthesize each turn with pacing & retry
-      const speakerMap = new Map(speakers.map((s) => [s.name, s]));
+      // General 2–10 Speaker Studio path: synthesize each turn with pacing, key rotation, & quota fallback
       const clips: Buffer[] = new Array(validTurns.length);
+      let modelUsed: string = preferredModel;
 
       const batchSize = 2;
       for (let i = 0; i < validTurns.length; i += batchSize) {
@@ -652,27 +936,29 @@ async function startServer() {
           batch.map((turn) => {
             const spk = speakerMap.get(turn.speaker) ?? speakers[0];
             return synthesizeSingleClip({
-              ai,
-              model: 'gemini-3.8-flash-tts',
+              model: preferredModel,
+              allowQuotaFallback,
               text: turn.text.trim(),
               voiceName: spk.voiceName,
               style: spk.style?.trim() || 'Natural conversational delivery',
+              emotionHint: turn.emotionHint,
             });
           })
         );
-        results.forEach((buf, offset) => {
-          clips[i + offset] = buf;
+        results.forEach((resClip, offset) => {
+          clips[i + offset] = resClip.wav;
+          modelUsed = resClip.modelUsed;
         });
         if (i + batchSize < validTurns.length) {
-          await sleep(350);
+          await sleep(300);
         }
       }
 
-      const merged = mergeWavBuffers(clips, 180);
+      const merged = mergeWavBuffers(clips, 160);
       res.json({
         audioBase64: merged.toString('base64'),
         mimeType: 'audio/wav',
-        modelUsed: 'gemini-3.8-flash-tts',
+        modelUsed,
       });
     } catch (err) {
       const { status, message } = extractApiErrorMessage(err);
@@ -694,6 +980,7 @@ async function startServer() {
         style?: string;
         text: string;
       }>;
+      const { model: preferredModel, allowQuotaFallback } = resolveTtsModelSelection(req.body);
 
       if (!Array.isArray(segments) || segments.length === 0) {
         res.status(400).json({ error: 'Please add at least one line to synthesize.' });
@@ -706,8 +993,8 @@ async function startServer() {
         return;
       }
 
-      const ai = getAiClient('v1beta');
       const clips: Buffer[] = new Array(validSegments.length);
+      let modelUsed: string = preferredModel;
 
       const batchSize = 2;
       for (let i = 0; i < validSegments.length; i += batchSize) {
@@ -715,19 +1002,20 @@ async function startServer() {
         const results = await Promise.all(
           batch.map((seg) =>
             synthesizeSingleClip({
-              ai,
-              model: 'gemini-3.8-flash-tts',
+              model: preferredModel,
+              allowQuotaFallback,
               text: seg.text.trim(),
               voiceName: seg.voiceName || 'Kore',
               style: seg.style?.trim() || 'Expressive natural storytelling',
             })
           )
         );
-        results.forEach((buf, offset) => {
-          clips[i + offset] = buf;
+        results.forEach((resClip, offset) => {
+          clips[i + offset] = resClip.wav;
+          modelUsed = resClip.modelUsed;
         });
         if (i + batchSize < validSegments.length) {
-          await sleep(350);
+          await sleep(300);
         }
       }
 
@@ -735,7 +1023,7 @@ async function startServer() {
       res.json({
         audioBase64: merged.toString('base64'),
         mimeType: 'audio/wav',
-        modelUsed: 'gemini-3.8-flash-tts',
+        modelUsed,
       });
     } catch (err) {
       const { status, message } = extractApiErrorMessage(err);
@@ -756,56 +1044,57 @@ async function startServer() {
       const mimeType = normalizeAudioMimeType(file.mimetype, file.originalname);
       const base64Audio = file.buffer.toString('base64');
 
-      const ai = getAiClient('v1beta');
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType,
-                data: base64Audio,
+      const response = await runWithKeyRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType,
+                  data: base64Audio,
+                },
               },
-            },
-            {
-              text: [
-                'Listen carefully to the speaker in this reference audio clip.',
-                'Analyze their pitch range, warmth, vocal texture, speaking pace, accent/language cadence, and emotional delivery.',
-                'Choose the closest matching prebuilt voice from ONLY these 5 options:',
-                '- Kore (female, clear, balanced studio voice)',
-                '- Zephyr (female, soft, warm, conversational voice)',
-                '- Puck (male, bright, energetic, expressive voice)',
-                '- Charon (male, deep, grounded, authoritative voice)',
-                '- Fenrir (male, bold, textured, resonant voice)',
-                'Then write a concise, vivid Voice Acting Direction prompt (max 22 words) that instructs a TTS actor to reproduce this exact speaking style, cadence, and tone.',
-                'Also write a short 1-sentence vocal profile summary.',
-              ].join('\n'),
-            },
-          ],
-        },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              baseVoice: {
-                type: Type.STRING,
-                description: 'Must be one of: Kore, Zephyr, Puck, Charon, Fenrir',
+              {
+                text: [
+                  'Listen carefully to the speaker in this reference audio clip.',
+                  'Analyze their pitch range, warmth, vocal texture, speaking pace, accent/language cadence, and emotional delivery.',
+                  'Choose the closest matching prebuilt voice from ONLY these 5 options:',
+                  '- Kore (female, clear, balanced studio voice)',
+                  '- Zephyr (female, soft, warm, conversational voice)',
+                  '- Puck (male, bright, energetic, expressive voice)',
+                  '- Charon (male, deep, grounded, authoritative voice)',
+                  '- Fenrir (male, bold, textured, resonant voice)',
+                  'Then write a concise, vivid Voice Acting Direction prompt (max 22 words) that instructs a TTS actor to reproduce this exact speaking style, cadence, and tone.',
+                  'Also write a short 1-sentence vocal profile summary.',
+                ].join('\n'),
               },
-              styleDirection: {
-                type: Type.STRING,
-                description: 'Concise TTS acting direction capturing tone, pace, warmth, and cadence.',
-              },
-              summary: {
-                type: Type.STRING,
-                description: 'Short 1-sentence description of the analyzed voice characteristics.',
-              },
-            },
-            required: ['baseVoice', 'styleDirection', 'summary'],
+            ],
           },
-        },
-      });
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                baseVoice: {
+                  type: Type.STRING,
+                  description: 'Must be one of: Kore, Zephyr, Puck, Charon, Fenrir',
+                },
+                styleDirection: {
+                  type: Type.STRING,
+                  description: 'Concise TTS acting direction capturing tone, pace, warmth, and cadence.',
+                },
+                summary: {
+                  type: Type.STRING,
+                  description: 'Short 1-sentence description of the analyzed voice characteristics.',
+                },
+              },
+              required: ['baseVoice', 'styleDirection', 'summary'],
+            },
+          },
+        })
+      );
 
       const parsed = JSON.parse((response.text ?? '{}').trim()) as {
         baseVoice?: string;
@@ -846,34 +1135,34 @@ async function startServer() {
         return;
       }
 
-      const ai = getAiClient('v1beta');
-
       if (format === 'dialogue') {
-        const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
-          contents: `Turn the following idea or draft into a natural conversation rotating between these speakers: ${speakerNames.join(', ')}. Keep it in the same language as the input (Bengali if input is Bengali, English if English). Optionally include subtle vocal cues like <breath>, <laugh>, |mhm|, or |yeah| where natural.\n\nDraft:\n${draft}`,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                turns: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      speaker: { type: Type.STRING },
-                      text: { type: Type.STRING },
+        const response = await runWithKeyRotation((ai) =>
+          ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: `Turn the following idea or draft into a natural conversation rotating between these speakers: ${speakerNames.join(', ')}. Keep it in the same language as the input (Bengali if input is Bengali, English if English). Optionally include subtle vocal cues like <breath>, <laugh>, |mhm|, or |yeah| where natural.\n\nDraft:\n${draft}`,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  turns: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        speaker: { type: Type.STRING },
+                        text: { type: Type.STRING },
+                      },
+                      required: ['speaker', 'text'],
                     },
-                    required: ['speaker', 'text'],
                   },
                 },
+                required: ['turns'],
               },
-              required: ['turns'],
             },
-          },
-        });
+          })
+        );
 
         const parsed = JSON.parse((response.text ?? '{}').trim()) as {
           turns?: Array<{ speaker: string; text: string }>;
@@ -882,13 +1171,15 @@ async function startServer() {
         return;
       }
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: `Rewrite or expand the following draft into a smooth, natural voiceover narration script ready for text-to-speech. Keep the exact language of the user's input (Bengali or English). Add natural punctuation and subtle <breath> pauses where appropriate. Return ONLY the script text.\n\nDraft:\n${draft}`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
+      const response = await runWithKeyRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: `Rewrite or expand the following draft into a smooth, natural voiceover narration script ready for text-to-speech. Keep the exact language of the user's input (Bengali or English). Add natural punctuation and subtle <breath> pauses where appropriate. Return ONLY the script text.\n\nDraft:\n${draft}`,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        })
+      );
 
       res.json({ script: (response.text ?? '').trim() });
     } catch (err) {
@@ -913,7 +1204,9 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`VoxCraft Studio server running on http://localhost:${PORT}`);
+    console.log(
+      `Milons Labs server running on http://localhost:${PORT} (${getConfiguredGeminiKeys().length} Gemini key(s) configured)`
+    );
   });
 }
 

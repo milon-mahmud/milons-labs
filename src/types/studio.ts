@@ -55,6 +55,7 @@ export interface DialogueTurn {
   id: string;
   speaker: string;
   text: string;
+  emotionHint?: string;
 }
 
 export interface VoiceShiftSegment {

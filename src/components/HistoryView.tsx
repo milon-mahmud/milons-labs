@@ -37,10 +37,10 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 
   if (items.length === 0) {
     return (
-      <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
-        <Clock className="w-8 h-8 text-slate-300 mx-auto mb-3" />
-        <h3 className="text-sm font-semibold text-slate-900">No Recent Exports Yet</h3>
-        <p className="text-sm text-slate-500 max-w-md mx-auto mt-1">
+      <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl p-12 text-center">
+        <Clock className="w-8 h-8 text-zinc-300 mx-auto mb-3" />
+        <h3 className="text-sm font-semibold text-zinc-950">No Recent Exports Yet</h3>
+        <p className="text-sm text-zinc-500 max-w-md mx-auto mt-1">
           Your generated SRT subtitle tracks and AI voiceover clips will appear here for quick re-download or editing.
         </p>
       </div>
@@ -48,14 +48,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   }
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-      <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
+    <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
+      <div className="px-5 py-4 border-b border-zinc-200 flex items-center justify-between gap-4 bg-[#FAFAFA]">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">
-            Session & Saved History
+          <h2 className="text-base font-semibold text-zinc-950">
+            Session &amp; Saved History
           </h2>
-          <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
-            {items.length} items stored locally in your browser
+          <p className="text-xs text-zinc-500 mt-0.5 font-mono tabular-nums">
+            {items.length} items stored locally
           </p>
         </div>
         <button
@@ -67,17 +67,17 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         </button>
       </div>
 
-      <div className="divide-y divide-slate-100">
+      <div className="divide-y divide-zinc-100">
         {items.map((item) => (
           <div
             key={item.id}
-            className="px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50/70 transition-colors"
+            className="px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-zinc-50 transition-colors"
           >
             <div className="min-w-0">
-              <p className="text-sm font-medium text-slate-900 truncate">
+              <p className="text-sm font-medium text-zinc-950 truncate">
                 {item.title}
               </p>
-              <p className="text-xs text-slate-500 mt-0.5 truncate">
+              <p className="text-xs text-zinc-500 mt-0.5 truncate">
                 {item.type === 'srt' ? 'SRT Subtitles' : 'AI Voiceover'} · {item.subtitle} ·{' '}
                 <span className="font-mono tabular-nums">
                   {new Date(item.createdAt).toLocaleTimeString([], {
@@ -92,7 +92,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
               <button
                 type="button"
                 onClick={() => onLoadItem(item)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <ArrowUpRight className="w-3.5 h-3.5" />
                 <span>Open</span>
@@ -100,7 +100,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
               <button
                 type="button"
                 onClick={() => downloadItem(item)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>{item.type === 'srt' ? '.SRT' : '.WAV'}</span>
@@ -109,7 +109,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                 type="button"
                 onClick={() => onDeleteItem(item.id)}
                 title="Remove from history"
-                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                className="p-1.5 text-zinc-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>

@@ -25,6 +25,7 @@ import {
   secondsToSrtTimestamp,
   srtTimestampToSeconds,
 } from '../utils/srt';
+import { splitAudioFileIfNeeded } from '../utils/audioChunker';
 
 interface SrtStudioProps {
   externalFile?: File | null;
@@ -59,6 +60,19 @@ const TRANSLATE_TARGETS = [
   { value: 'Hindi', label: 'Translate to Hindi' },
 ];
 
+const SRT_MODELS = [
+  {
+    id: 'gemini-4-hydrogen' as const,
+    name: 'Flash Sync v4',
+    detail: 'Ultra-fast single-pass timestamped SRT + high free-tier quota',
+  },
+  {
+    id: 'gemini-3.5-transcribe' as const,
+    name: 'Transcribe Precision v3.5',
+    detail: 'Two-pass verbatim speech recognition + timestamp alignment',
+  },
+];
+
 export const SrtStudio: React.FC<SrtStudioProps> = ({
   externalFile,
   onExternalFileConsumed,
@@ -76,6 +90,9 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
 
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState<string>('');
+  const [srtModel, setSrtModel] = useState<'gemini-4-hydrogen' | 'gemini-3.5-transcribe'>(
+    'gemini-4-hydrogen'
+  );
   const [language, setLanguage] = useState('auto');
   const [translateTo, setTranslateTo] = useState('none');
   const [maxCharsPerLine, setMaxCharsPerLine] = useState(42);
@@ -84,6 +101,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingLabel, setProcessingLabel] = useState('Transcribing & Syncing...');
   const [error, setError] = useState<string | null>(null);
 
   const [currentTime, setCurrentTime] = useState(0);
@@ -91,9 +109,9 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [copied, setCopied] = useState(false);
   const [detectedLanguage, setDetectedLanguage] = useState<string>('');
+  const [lastModelUsed, setLastModelUsed] = useState<string>('');
   const [projectTitle, setProjectTitle] = useState<string>('Untitled Subtitles');
 
-  // Manage object URL lifecycle
   useEffect(() => {
     if (!audioFile) {
       setAudioUrl('');
@@ -107,7 +125,6 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
     };
   }, [audioFile]);
 
-  // Accept file forwarded from Voice Studio
   useEffect(() => {
     if (externalFile) {
       setAudioFile(externalFile);
@@ -116,7 +133,6 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
     }
   }, [externalFile, onExternalFileConsumed]);
 
-  // Accept history item loaded from HistoryView
   useEffect(() => {
     if (loadedCues && loadedCues.length > 0) {
       setCues(loadedCues);
@@ -134,8 +150,8 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
 
   const handleSelectFile = (file: File | undefined) => {
     if (!file) return;
-    if (file.size > 25 * 1024 * 1024) {
-      setError('File exceeds 25 MB limit. Please trim or compress the audio below 25 MB.');
+    if (file.size > 150 * 1024 * 1024) {
+      setError('File exceeds 150 MB limit. Please compress the audio below 150 MB.');
       return;
     }
     setError(null);
@@ -205,39 +221,83 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
     }
 
     setIsProcessing(true);
+    setProcessingLabel('Preparing audio stream...');
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append('audio', audioFile);
-      formData.append('language', language);
-      formData.append('translateTo', translateTo);
-      formData.append('maxCharsPerLine', String(maxCharsPerLine));
+      const chunks = await splitAudioFileIfNeeded(audioFile);
+      const mergedCues: SrtCue[] = [];
+      let detectedLang = language === 'auto' ? 'Auto-detected' : language;
+      let usedModel: string = srtModel;
 
-      const response = await fetch('/api/transcribe-srt', {
-        method: 'POST',
-        body: formData,
-      });
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        setProcessingLabel(
+          chunks.length > 1
+            ? `Transcribing part ${i + 1} of ${chunks.length}...`
+            : 'Generating synced SRT...'
+        );
 
-      const payload = (await response.json()) as Partial<SrtGenerationResult> & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || 'Failed to transcribe audio.');
+        const formData = new FormData();
+        formData.append('audio', chunk.file);
+        formData.append('language', language);
+        formData.append('translateTo', translateTo);
+        formData.append('maxCharsPerLine', String(maxCharsPerLine));
+        formData.append('srtModel', srtModel);
+
+        const response = await fetch('/api/transcribe-srt', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const payload = (await response.json()) as Partial<SrtGenerationResult> & {
+          error?: string;
+        };
+        if (!response.ok) {
+          throw new Error(payload.error || 'Failed to transcribe audio.');
+        }
+
+        if (payload.detectedLanguage && i === 0) {
+          detectedLang = payload.detectedLanguage;
+        }
+        if (payload.modelUsed) {
+          usedModel = payload.modelUsed;
+        }
+
+        const chunkCues = payload.cues ?? [];
+        for (const c of chunkCues) {
+          const start = Number((c.startSeconds + chunk.offsetSeconds).toFixed(3));
+          const end = Number((c.endSeconds + chunk.offsetSeconds).toFixed(3));
+          mergedCues.push({
+            id: mergedCues.length + 1,
+            startSeconds: start,
+            endSeconds: end,
+            startTime: secondsToSrtTimestamp(start),
+            endTime: secondsToSrtTimestamp(end),
+            text: c.text,
+          });
+        }
+
+        if (i < chunks.length - 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
       }
 
-      const nextCues = payload.cues ?? [];
-      setCues(nextCues);
-      const lang = payload.detectedLanguage || (language === 'auto' ? 'Auto-detected' : language);
-      setDetectedLanguage(lang);
+      setCues(mergedCues);
+      setDetectedLanguage(detectedLang);
+      setLastModelUsed(usedModel);
 
       onSaveHistory({
         title: audioFile.name.replace(/\.[^/.]+$/, '') || 'Untitled Subtitles',
-        cues: nextCues,
-        language: translateTo !== 'none' ? `${lang} → ${translateTo}` : lang,
+        cues: mergedCues,
+        language:
+          translateTo !== 'none' ? `${detectedLang} → ${translateTo}` : detectedLang,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Transcription failed.');
     } finally {
       setIsProcessing(false);
+      setProcessingLabel('Transcribing & Syncing...');
     }
   };
 
@@ -375,113 +435,145 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
   };
 
   const totalDurationSeconds = cues.length > 0 ? cues[cues.length - 1].endSeconds : 0;
+  const activeModelMeta = SRT_MODELS.find((m) => m.id === srtModel) || SRT_MODELS[0];
 
   return (
     <div className="space-y-6">
-      {/* Top Intake & Settings Grid */}
+      {/* ElevenLabs Split Workspace: Main Audio Canvas + Right Settings Inspector */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        {/* Audio Source Panel */}
-        <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">
-                  1. Upload or Record Audio
-                </h2>
-                <p className="text-sm text-slate-500 mt-0.5">
-                  MP3, WAV, M4A, OGG, WebM, or MP4 up to 25 MB
+        {/* Left Main Audio Workspace */}
+        <div className="lg:col-span-8 flex flex-col justify-between bg-white border border-zinc-200 rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-950">
+                Source Audio or Video
+              </h2>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                MP3, WAV, M4A, OGG, WebM, or MP4 up to 150 MB · 30+ min recordings auto-chunk seamlessly
+              </p>
+            </div>
+
+            {!isRecording ? (
+              <button
+                type="button"
+                onClick={startRecording}
+                className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-zinc-800 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              >
+                <Mic className="w-3.5 h-3.5" />
+                <span>Record Mic</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={stopRecording}
+                className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              >
+                <Square className="w-3.5 h-3.5 fill-current" />
+                <span className="font-mono tabular-nums">
+                  Stop ({formatDisplayTime(recordingSeconds)})
+                </span>
+              </button>
+            )}
+          </div>
+
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            className={`flex-1 min-h-[190px] flex flex-col items-center justify-center border border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${
+              isDragging
+                ? 'border-zinc-950 bg-zinc-100/70'
+                : 'border-zinc-300 bg-[#FAFAFA] hover:border-zinc-500 hover:bg-zinc-50'
+            }`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="audio/*,video/mp4,video/webm,.mp3,.wav,.m4a,.ogg,.flac,.aac"
+              className="hidden"
+              onChange={(e) => handleSelectFile(e.target.files?.[0])}
+            />
+            {audioFile ? (
+              <div className="flex flex-col items-center gap-1.5">
+                <div className="w-10 h-10 rounded-full bg-zinc-950 text-white flex items-center justify-center mb-1">
+                  <FileAudio className="w-5 h-5" />
+                </div>
+                <p className="text-sm font-medium text-zinc-950 truncate max-w-md">
+                  {audioFile.name}
+                </p>
+                <p className="text-xs text-zinc-500 font-mono tabular-nums">
+                  {(audioFile.size / (1024 * 1024)).toFixed(2)} MB · Click to replace file
                 </p>
               </div>
-
-              {!isRecording ? (
-                <button
-                  type="button"
-                  onClick={startRecording}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Mic className="w-3.5 h-3.5" />
-                  <span>Record Mic</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={stopRecording}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Square className="w-3.5 h-3.5 fill-current" />
-                  <span className="font-mono tabular-nums">
-                    Stop ({formatDisplayTime(recordingSeconds)})
-                  </span>
-                </button>
-              )}
-            </div>
-
-            <div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  fileInputRef.current?.click();
-                }
-              }}
-              className={`border border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
-                isDragging
-                  ? 'border-blue-600 bg-blue-50/50'
-                  : 'border-slate-300 bg-slate-50/70 hover:border-slate-400 hover:bg-slate-50'
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="audio/*,video/mp4,video/webm,.mp3,.wav,.m4a,.ogg,.flac,.aac"
-                className="hidden"
-                onChange={(e) => handleSelectFile(e.target.files?.[0])}
-              />
-              {audioFile ? (
-                <div className="flex flex-col items-center gap-1.5">
-                  <FileAudio className="w-7 h-7 text-blue-600" />
-                  <p className="text-sm font-medium text-slate-900 truncate max-w-full">
-                    {audioFile.name}
-                  </p>
-                  <p className="text-xs text-slate-500 font-mono tabular-nums">
-                    {(audioFile.size / (1024 * 1024)).toFixed(2)} MB · Click to replace file
-                  </p>
+            ) : (
+              <div className="flex flex-col items-center gap-1.5">
+                <div className="w-10 h-10 rounded-full bg-white border border-zinc-200 text-zinc-600 flex items-center justify-center mb-1">
+                  <Upload className="w-4 h-4" />
                 </div>
-              ) : (
-                <div className="flex flex-col items-center gap-1.5">
-                  <Upload className="w-7 h-7 text-slate-400" />
-                  <p className="text-sm font-medium text-slate-700">
-                    Drop an audio or video file here, or click to browse
-                  </p>
-                  <p className="text-xs text-slate-500">
-                    Supports Bangla, English, Hindi, and 50+ spoken languages
-                  </p>
-                </div>
-              )}
-            </div>
+                <p className="text-sm font-medium text-zinc-900">
+                  Click to upload or drag and drop audio
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Supports Bangla, English, Hindi, and 50+ spoken languages
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Subtitle Configuration Panel */}
-        <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+        {/* Right ElevenLabs Settings Inspector */}
+        <div className="lg:col-span-4 bg-[#FAFAFA] border border-zinc-200 rounded-xl p-5 flex flex-col justify-between space-y-5">
           <div className="space-y-4">
-            <h2 className="text-base font-semibold text-slate-900">
-              2. Subtitle Settings
+            <h2 className="text-sm font-semibold text-zinc-950">
+              Settings
             </h2>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-3.5">
+            {/* Transcription Model Switch */}
+            <div className="space-y-1.5">
+              <label
+                htmlFor="srt-model-select"
+                className="block text-xs font-medium text-zinc-600"
+              >
+                Transcription Model
+              </label>
+              <select
+                id="srt-model-select"
+                value={srtModel}
+                onChange={(e) =>
+                  setSrtModel(
+                    e.target.value as 'gemini-4-hydrogen' | 'gemini-3.5-transcribe'
+                  )
+                }
+                className="w-full px-3 py-2 text-sm font-medium bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+              >
+                {SRT_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-zinc-500">
+                {activeModelMeta.detail}
+              </p>
+            </div>
+
+            <div className="border-t border-zinc-200 pt-4 space-y-3.5">
               <div>
                 <label
                   htmlFor="srt-source-lang"
-                  className="block text-xs font-medium text-slate-600 mb-1.5"
+                  className="block text-xs font-medium text-zinc-600 mb-1.5"
                 >
                   Spoken Language
                 </label>
@@ -489,7 +581,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
                   id="srt-source-lang"
                   value={language}
                   onChange={(e) => setLanguage(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 text-sm bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                 >
                   {LANGUAGES.map((l) => (
                     <option key={l.value} value={l.value}>
@@ -502,15 +594,15 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
               <div>
                 <label
                   htmlFor="srt-translate-lang"
-                  className="block text-xs font-medium text-slate-600 mb-1.5"
+                  className="block text-xs font-medium text-zinc-600 mb-1.5"
                 >
-                  Output Translation
+                  Translate Output
                 </label>
                 <select
                   id="srt-translate-lang"
                   value={translateTo}
                   onChange={(e) => setTranslateTo(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 text-sm bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                 >
                   {TRANSLATE_TARGETS.map((t) => (
                     <option key={t.value} value={t.value}>
@@ -521,10 +613,10 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                  Line Length
-                </label>
-                <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 rounded-lg">
+                <span className="block text-xs font-medium text-zinc-600 mb-1.5">
+                  Line Character Limit
+                </span>
+                <div className="grid grid-cols-3 gap-1 p-1 bg-zinc-200/70 rounded-lg">
                   {[
                     { chars: 32, label: 'Compact (32)' },
                     { chars: 42, label: 'Standard (42)' },
@@ -536,8 +628,8 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
                       onClick={() => setMaxCharsPerLine(opt.chars)}
                       className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                         maxCharsPerLine === opt.chars
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
+                          ? 'bg-white text-zinc-950 shadow-xs'
+                          : 'text-zinc-600 hover:text-zinc-950'
                       }`}
                     >
                       {opt.label}
@@ -552,9 +644,9 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
             type="button"
             onClick={generateSrt}
             disabled={isProcessing || !audioFile}
-            className="mt-5 w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap"
+            className="w-full py-2.5 px-4 bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap"
           >
-            {isProcessing ? 'Transcribing & Syncing Timestamps...' : 'Generate SRT Subtitles'}
+            {isProcessing ? processingLabel : 'Generate Subtitles'}
           </button>
         </div>
       </div>
@@ -562,7 +654,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
       {error && (
         <div
           role="alert"
-          className="flex items-start gap-2.5 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"
+          className="flex items-start gap-2.5 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700"
         >
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{error}</span>
@@ -579,7 +671,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
             seekToSeconds={seekTarget}
           />
           {cues.length > 0 && (
-            <div className="bg-slate-900 text-white rounded-xl px-5 py-3.5 text-center min-h-[56px] flex items-center justify-center">
+            <div className="bg-zinc-950 text-white rounded-xl px-5 py-3.5 text-center min-h-[56px] flex items-center justify-center">
               <p className="text-sm sm:text-base font-medium leading-relaxed">
                 {activeCue ? activeCue.text : 'Play audio to preview synced subtitles here'}
               </p>
@@ -590,44 +682,45 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
 
       {/* Loading Skeleton */}
       {isProcessing && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-          <div className="h-5 w-48 bg-slate-200 rounded animate-pulse" />
+        <div className="bg-white border border-zinc-200 rounded-xl p-5 space-y-3">
+          <div className="h-5 w-48 bg-zinc-200 rounded animate-pulse" />
           {[1, 2, 3, 4].map((row) => (
-            <div key={row} className="h-11 w-full bg-slate-100 rounded-lg animate-pulse" />
+            <div key={row} className="h-11 w-full bg-zinc-100 rounded-lg animate-pulse" />
           ))}
         </div>
       )}
 
-      {/* Interactive SRT Cue Editor */}
+      {/* Interactive SRT Timeline Editor */}
       {!isProcessing && cues.length > 0 && (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
+        <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-zinc-200 bg-[#FAFAFA] flex flex-wrap items-center justify-between gap-4">
             <div>
-              <h3 className="text-base font-semibold text-slate-900">
-                Subtitle Cue Editor
+              <h3 className="text-sm font-semibold text-zinc-950">
+                Subtitle Cue Timeline
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
+              <p className="text-xs text-zinc-500 mt-0.5 font-mono tabular-nums">
                 {cues.length} cues · {formatDisplayTime(totalDurationSeconds)} total
                 {detectedLanguage ? ` · ${detectedLanguage}` : ''}
+                {lastModelUsed ? ` · ${lastModelUsed}` : ''}
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Filter cues..."
-                  className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
+                  className="pl-8 pr-3 py-1.5 text-xs bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 w-40"
                 />
               </div>
 
               <button
                 type="button"
                 onClick={addCue}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Add Cue</span>
@@ -636,7 +729,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
               <button
                 type="button"
                 onClick={copySrtToClipboard}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copied ? 'Copied' : 'Copy SRT'}</span>
@@ -645,7 +738,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
               <button
                 type="button"
                 onClick={() => triggerDownload(buildPlainTextString(cues), 'txt')}
-                className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 .TXT
               </button>
@@ -653,7 +746,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
               <button
                 type="button"
                 onClick={() => triggerDownload(buildVttString(cues), 'vtt')}
-                className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 .VTT
               </button>
@@ -661,7 +754,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
               <button
                 type="button"
                 onClick={() => triggerDownload(buildSrtString(cues), 'srt')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Download .SRT</span>
@@ -669,25 +762,25 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
             </div>
           </div>
 
-          <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto">
+          <div className="divide-y divide-zinc-100 max-h-[520px] overflow-y-auto">
             {filteredCues.map((cue) => {
               const isActive = cue.id === activeCueId;
               return (
                 <div
                   key={cue.id}
                   className={`px-5 py-3 flex flex-col md:flex-row md:items-center gap-3 transition-colors ${
-                    isActive ? 'bg-blue-50/70' : 'hover:bg-slate-50/80'
+                    isActive ? 'bg-zinc-100' : 'hover:bg-zinc-50'
                   }`}
                 >
                   <div className="flex items-center gap-2 shrink-0">
-                    <span className="w-7 text-xs font-mono tabular-nums text-slate-400 text-right">
+                    <span className="w-7 text-xs font-mono tabular-nums text-zinc-400 text-right">
                       {cue.id}
                     </span>
                     <button
                       type="button"
                       onClick={() => setSeekTarget(cue.startSeconds)}
                       title="Play from this cue"
-                      className="w-7 h-7 rounded-md bg-slate-100 hover:bg-blue-100 text-slate-600 hover:text-blue-700 flex items-center justify-center transition-colors shrink-0"
+                      className="w-7 h-7 rounded-full bg-zinc-100 hover:bg-zinc-950 text-zinc-700 hover:text-white flex items-center justify-center transition-colors shrink-0"
                     >
                       <Play className="w-3 h-3 ml-0.5" />
                     </button>
@@ -697,16 +790,16 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
                       onChange={(e) => updateCueTiming(cue.id, 'startTime', e.target.value)}
                       onBlur={() => normalizeCueTiming(cue.id)}
                       aria-label={`Cue ${cue.id} start time`}
-                      className="w-28 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-28 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-zinc-200 rounded-md text-zinc-700 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     />
-                    <span className="text-slate-300 text-xs">→</span>
+                    <span className="text-zinc-300 text-xs">→</span>
                     <input
                       type="text"
                       value={cue.endTime}
                       onChange={(e) => updateCueTiming(cue.id, 'endTime', e.target.value)}
                       onBlur={() => normalizeCueTiming(cue.id)}
                       aria-label={`Cue ${cue.id} end time`}
-                      className="w-28 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-28 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-zinc-200 rounded-md text-zinc-700 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     />
                   </div>
 
@@ -716,7 +809,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
                       value={cue.text}
                       onChange={(e) => updateCueText(cue.id, e.target.value)}
                       aria-label={`Cue ${cue.id} text`}
-                      className="w-full px-3 py-1.5 text-sm bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-1.5 text-sm bg-white border border-zinc-200 rounded-md text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     />
                   </div>
 
@@ -725,7 +818,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
                       type="button"
                       onClick={() => splitCue(cue.id)}
                       title="Split cue in half"
-                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md transition-colors"
+                      className="p-1.5 text-zinc-400 hover:text-zinc-950 hover:bg-zinc-100 rounded-md transition-colors"
                     >
                       <Scissors className="w-3.5 h-3.5" />
                     </button>
@@ -733,7 +826,7 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
                       type="button"
                       onClick={() => deleteCue(cue.id)}
                       title="Delete cue"
-                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
+                      className="p-1.5 text-zinc-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -745,15 +838,14 @@ export const SrtStudio: React.FC<SrtStudioProps> = ({
         </div>
       )}
 
-      {/* Empty State */}
-      {!isProcessing && cues.length === 0 && (
-        <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
-          <Subtitles className="w-8 h-8 text-slate-300 mx-auto mb-3" />
-          <h3 className="text-sm font-semibold text-slate-900">
+      {!isProcessing && cues.length === 0 && !audioUrl && (
+        <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl p-10 text-center">
+          <Subtitles className="w-8 h-8 text-zinc-300 mx-auto mb-3" />
+          <h3 className="text-sm font-semibold text-zinc-950">
             Ready for Audio Transcription
           </h3>
-          <p className="text-sm text-slate-500 max-w-md mx-auto mt-1">
-            Upload an audio track or record directly from your microphone, then click Generate SRT Subtitles to create editable, synced captions.
+          <p className="text-xs text-zinc-500 max-w-md mx-auto mt-1 leading-relaxed">
+            Upload an audio or video clip above, choose Flash Sync v4 or Transcribe Precision v3.5 in the Settings inspector, and generate synchronized .SRT subtitles.
           </p>
         </div>
       )}

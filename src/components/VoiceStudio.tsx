@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import {
   BANGLA_VOICE_SHIFT_DEMO,
+  RIMI_TULTUL_STORY_PRESET,
   SAMPLE_SCRIPTS,
   STUDIO_VOICES,
   STYLE_PRESETS,
@@ -24,6 +25,7 @@ import {
 } from '../data/voices';
 import { WaveformPlayer } from './WaveformPlayer';
 import { formatDisplayTime } from '../utils/srt';
+import { parseScreenplayScript } from '../utils/scriptParser';
 import type {
   CustomVoicePersona,
   DialogueSpeaker,
@@ -34,6 +36,45 @@ import type {
 } from '../types/studio';
 
 const PERSONA_STORAGE_KEY = 'voxcraft_custom_personas_v1';
+
+type TtsModelChoice =
+  | 'auto'
+  | 'gemini-3.8-flash-tts'
+  | 'gemini-3.8-flash-lite-tts'
+  | 'gemini-2.5-pro-preview-tts'
+  | 'gemini-2.5-flash-preview-tts';
+
+const TTS_MODEL_OPTIONS: Array<{
+  id: TtsModelChoice;
+  label: string;
+  subtitle: string;
+}> = [
+  {
+    id: 'auto',
+    label: 'Auto (All-Model Failover)',
+    subtitle: 'Cascades 3.8 Flash → 3.8 Flash-Lite → 2.5 Flash → 2.5 Pro automatically on quota limits',
+  },
+  {
+    id: 'gemini-3.8-flash-tts',
+    label: 'Gemini 3.8 Flash TTS',
+    subtitle: 'Latest expressive voice design, <breath>/<laugh> tags, & rich Bangla drama',
+  },
+  {
+    id: 'gemini-3.8-flash-lite-tts',
+    label: 'Gemini 3.8 Flash-Lite TTS',
+    subtitle: 'Ultra-fast, low-latency synthesis with higher free-tier daily quota',
+  },
+  {
+    id: 'gemini-2.5-pro-preview-tts',
+    label: 'Gemini 2.5 Pro TTS',
+    subtitle: 'Flagship 2.5 Pro fidelity for long-form audiobooks & dramatic storytelling',
+  },
+  {
+    id: 'gemini-2.5-flash-preview-tts',
+    label: 'Gemini 2.5 Flash TTS',
+    subtitle: 'Fast 2.5 generation TTS with separate free-tier quota bucket',
+  },
+];
 
 const DEFAULT_SPEAKER_TEMPLATES: Array<{
   name: string;
@@ -83,7 +124,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
   const timerRef = useRef<number | null>(null);
 
   const [studioMode, setStudioMode] = useState<'single' | 'shift' | 'dialogue' | 'persona'>('single');
-  const [expressiveMode, setExpressiveMode] = useState<'standard' | 'expressive'>('expressive');
+  const [ttsModel, setTtsModel] = useState<TtsModelChoice>('auto');
   const [selectedVoice, setSelectedVoice] = useState<VoiceName>('Kore');
   const [selectedPersonaId, setSelectedPersonaId] = useState<string | null>(null);
   const [styleDirection, setStyleDirection] = useState<string>(
@@ -93,7 +134,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
   const [isDesigningVoice, setIsDesigningVoice] = useState<boolean>(false);
   const [pace, setPace] = useState<'slow' | 'natural' | 'fast'>('natural');
   const [emotionLevel, setEmotionLevel] = useState<'subtle' | 'balanced' | 'expressive'>('expressive');
-  const [scriptText, setScriptText] = useState<string>(SAMPLE_SCRIPTS.english);
+  const [scriptText, setScriptText] = useState<string>(SAMPLE_SCRIPTS.bangla);
 
   const [customPersonas, setCustomPersonas] = useState<CustomVoicePersona[]>(() => {
     try {
@@ -119,18 +160,18 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
   const [sampleRecordSeconds, setSampleRecordSeconds] = useState(0);
   const [isMatchingPersona, setIsMatchingPersona] = useState(false);
 
-  // Multi-Speaker Studio (2 up to 10 speakers, Male & Female switching)
+  // Multi-Speaker Studio (2 up to 10 speakers)
   const [speakers, setSpeakers] = useState<DialogueSpeaker[]>([
     { id: 'spk-1', ...DEFAULT_SPEAKER_TEMPLATES[0] },
     { id: 'spk-2', ...DEFAULT_SPEAKER_TEMPLATES[1] },
   ]);
   const [turns, setTurns] = useState<DialogueTurn[]>([
-    { id: 't1', speaker: 'Maya', text: SAMPLE_SCRIPTS.podcastA },
-    { id: 't2', speaker: 'Arif', text: SAMPLE_SCRIPTS.podcastB },
+    { id: 't1', speaker: 'Maya', text: SAMPLE_SCRIPTS.banglaPodcastA },
+    { id: 't2', speaker: 'Arif', text: SAMPLE_SCRIPTS.banglaPodcastB },
   ]);
   const [activeTurnId, setActiveTurnId] = useState<string>('t1');
 
-  // One Speaker · Multi-Voice Shifting state
+  // Voice-Shifting Speaker state
   const [shiftSegments, setShiftSegments] = useState<VoiceShiftSegment[]>(() =>
     BANGLA_VOICE_SHIFT_DEMO.map((seg, i) => ({
       id: `seg-${i + 1}`,
@@ -139,6 +180,11 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
   );
   const [activeSegmentId, setActiveSegmentId] = useState<string>('seg-1');
 
+  const [showScriptImporter, setShowScriptImporter] = useState(false);
+  const [rawScreenplayDraft, setRawScreenplayDraft] = useState(
+    RIMI_TULTUL_STORY_PRESET.rawScript
+  );
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPolishing, setIsPolishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -146,6 +192,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
   const [generatedAudioUrl, setGeneratedAudioUrl] = useState<string>('');
   const [generatedTitle, setGeneratedTitle] = useState<string>('voiceover.wav');
   const [generatedBase64, setGeneratedBase64] = useState<string>('');
+  const [lastModelUsed, setLastModelUsed] = useState<string>('');
 
   useEffect(() => {
     if (loadedAudioUrl) {
@@ -242,7 +289,6 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
       setSelectedPersonaId(newPersona.id);
       setSelectedVoice(baseVoice);
       setStyleDirection(refinedStyle);
-      setExpressiveMode('expressive');
       setVoiceDesignPrompt('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to design voice.');
@@ -336,13 +382,11 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
             text: scriptText,
             voiceName: selectedVoice,
             style: composedStyle,
-            mode: expressiveMode,
+            ttsModel,
           }),
         });
         const persona = customPersonas.find((p) => p.id === selectedPersonaId);
-        label = persona
-          ? `${persona.name} (${selectedVoice}) · ${expressiveMode === 'expressive' ? 'Expressive' : 'Standard'}`
-          : `${selectedVoice} · ${expressiveMode === 'expressive' ? 'Expressive' : 'Standard'}`;
+        label = persona ? `${persona.name} (${selectedVoice})` : selectedVoice;
         preview = scriptText.slice(0, 90);
       } else if (studioMode === 'shift') {
         const validSegs = shiftSegments.filter((s) => s.text.trim().length > 0);
@@ -358,9 +402,10 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               style: s.style,
               text: s.text,
             })),
+            ttsModel,
           }),
         });
-        label = `Voice-Shifting Speaker · ${validSegs.length} tones`;
+        label = `Voice-Shifting · ${validSegs.length} tones`;
         preview = validSegs.map((s) => s.text).join(' ').slice(0, 90);
       } else {
         const validTurns = turns.filter((t) => t.text.trim().length > 0);
@@ -376,7 +421,12 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               voiceName: s.voiceName,
               style: s.style,
             })),
-            turns: validTurns.map((t) => ({ speaker: t.speaker, text: t.text })),
+            turns: validTurns.map((t) => ({
+              speaker: t.speaker,
+              text: t.text,
+              emotionHint: t.emotionHint,
+            })),
+            ttsModel,
           }),
         });
         label = `${speakers.length} Speakers (${speakers
@@ -394,18 +444,19 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
       const dataUrl = `data:audio/wav;base64,${data.audioBase64}`;
       const title =
         studioMode === 'single'
-          ? `voxcraft-${selectedVoice.toLowerCase()}.wav`
+          ? `milons-labs-${selectedVoice.toLowerCase()}.wav`
           : studioMode === 'shift'
-            ? 'voxcraft-voice-shift.wav'
-            : `voxcraft-${speakers.length}speaker-mix.wav`;
+            ? 'milons-labs-voice-shift.wav'
+            : `milons-labs-${speakers.length}speaker-mix.wav`;
 
       setGeneratedBase64(data.audioBase64);
       setGeneratedAudioUrl(dataUrl);
       setGeneratedTitle(title);
+      setLastModelUsed(data.modelUsed || '');
 
       onSaveHistory({
         title: title.replace('.wav', ''),
-        voiceLabel: label,
+        voiceLabel: `${label}${data.modelUsed ? ` · ${data.modelUsed}` : ''}`,
         scriptPreview: preview,
         audioDataUrl: dataUrl,
       });
@@ -497,7 +548,6 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
       setSelectedPersonaId(created.id);
       setSelectedVoice(created.baseVoice);
       setStyleDirection(created.styleDirection);
-      setExpressiveMode('expressive');
       setSampleFile(null);
       setStudioMode('single');
     } catch (err) {
@@ -615,426 +665,442 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
     setActiveTurnId(newId);
   };
 
+  const activeModelMeta =
+    TTS_MODEL_OPTIONS.find((m) => m.id === ttsModel) || TTS_MODEL_OPTIONS[0];
+
   return (
     <div className="space-y-6">
-      {/* Studio Mode Switcher */}
+      {/* ElevenLabs Mode Toolbar + Compact TTS Model Switch */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="inline-flex items-center gap-1 p-1 bg-slate-200/70 rounded-lg overflow-x-auto">
+        <div className="inline-flex items-center gap-1 p-1 bg-zinc-100 border border-zinc-200 rounded-lg overflow-x-auto">
           <button
             type="button"
             onClick={() => setStudioMode('single')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
               studioMode === 'single'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-white text-zinc-950 shadow-xs'
+                : 'text-zinc-600 hover:text-zinc-950'
             }`}
           >
-            Single Voice & Design
+            Text to Speech
           </button>
           <button
             type="button"
             onClick={() => setStudioMode('shift')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
               studioMode === 'shift'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-white text-zinc-950 shadow-xs'
+                : 'text-zinc-600 hover:text-zinc-950'
             }`}
           >
-            Voice-Shifting Speaker
+            Voice-Shifting
           </button>
           <button
             type="button"
             onClick={() => setStudioMode('dialogue')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
               studioMode === 'dialogue'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-white text-zinc-950 shadow-xs'
+                : 'text-zinc-600 hover:text-zinc-950'
             }`}
           >
-            Multi-Speaker (Up to 10)
+            Multi-Speaker (10)
           </button>
           <button
             type="button"
             onClick={() => setStudioMode('persona')}
             className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
               studioMode === 'persona'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-white text-zinc-950 shadow-xs'
+                : 'text-zinc-600 hover:text-zinc-950'
             }`}
           >
-            Clone Style from Audio
+            Voice Style Matcher
           </button>
         </div>
 
-        {studioMode === 'single' && (
-          <div className="inline-flex items-center gap-1 p-1 bg-slate-200/70 rounded-lg">
-            <button
-              type="button"
-              onClick={() => setExpressiveMode('standard')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                expressiveMode === 'standard'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+        {/* Dedicated TTS Model Switcher Bar */}
+        {studioMode !== 'persona' && (
+          <div className="flex items-center gap-2.5">
+            <label
+              htmlFor="tts-model-bar-select"
+              className="text-xs font-medium text-zinc-500 whitespace-nowrap"
             >
-              Standard (Fast)
-            </button>
-            <button
-              type="button"
-              onClick={() => setExpressiveMode('expressive')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                expressiveMode === 'expressive'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+              TTS Model
+            </label>
+            <select
+              id="tts-model-bar-select"
+              value={ttsModel}
+              onChange={(e) => setTtsModel(e.target.value as TtsModelChoice)}
+              className="px-3 py-1.5 text-xs font-medium bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
             >
-              Voice Design (Expressive)
-            </button>
+              {TTS_MODEL_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
           </div>
         )}
       </div>
 
       {studioMode === 'single' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-          {/* Left: Prompt Voice Designer + Voice Selection */}
-          <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-5">
-            {/* Prompt-based Voice Design Box */}
-            <div className="pb-4 border-b border-slate-100 space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Design Voice from Prompt
-                </h2>
-                <span className="text-xs text-slate-500">Auto-selects Male/Female</span>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={voiceDesignPrompt}
-                  onChange={(e) => setVoiceDesignPrompt(e.target.value)}
-                  placeholder="e.g. Deep dramatic male narrator or soft Bangla female host..."
-                  className="flex-1 min-w-0 px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <button
-                  type="button"
-                  onClick={handleDesignVoiceFromPrompt}
-                  disabled={isDesigningVoice || !voiceDesignPrompt.trim()}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>{isDesigningVoice ? 'Designing...' : 'Design'}</span>
-                </button>
-              </div>
+        <div className="space-y-5">
+          {/* Top Voice Design Bar — always visible above the script editor */}
+          <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl px-4 py-3.5 flex flex-col md:flex-row md:items-center gap-3">
+            <div className="md:w-56 shrink-0">
+              <p className="text-xs font-semibold text-zinc-950">
+                Design Voice from Prompt
+              </p>
+              <p className="text-xs text-zinc-500">
+                Auto-selects Male/Female &amp; tone
+              </p>
             </div>
-
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-base font-semibold text-slate-900">
-                  1. Choose Studio Voice
-                </h2>
-                <button
-                  type="button"
-                  onClick={() => setStudioMode('persona')}
-                  className="text-xs font-medium text-blue-600 hover:text-blue-700 whitespace-nowrap shrink-0"
-                >
-                  + Match Audio Sample
-                </button>
-              </div>
-
-              {customPersonas.length > 0 && (
-                <div className="mt-3 space-y-2 pb-3 border-b border-slate-100">
-                  <p className="text-xs font-medium text-slate-500">
-                    Designed & Saved Voices
-                  </p>
-                  {customPersonas.map((persona) => {
-                    const active = selectedPersonaId === persona.id;
-                    return (
-                      <div
-                        key={persona.id}
-                        className={`flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-lg border transition-colors ${
-                          active
-                            ? 'border-blue-600 bg-blue-50/50'
-                            : 'border-slate-200 bg-white hover:bg-slate-50'
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedPersonaId(persona.id);
-                            setSelectedVoice(persona.baseVoice);
-                            setStyleDirection(persona.styleDirection);
-                            setExpressiveMode('expressive');
-                          }}
-                          className="flex-1 text-left min-w-0"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-semibold text-slate-900 truncate">
-                              {persona.name}
-                            </span>
-                            <span className="text-xs text-slate-500 shrink-0">
-                              {getVoiceGender(persona.baseVoice)} · {persona.baseVoice}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-500 mt-0.5 truncate">
-                            {persona.summary}
-                          </p>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCustomPersonas((prev) =>
-                              prev.filter((p) => p.id !== persona.id)
-                            );
-                            if (selectedPersonaId === persona.id) {
-                              setSelectedPersonaId(null);
-                            }
-                          }}
-                          title="Delete designed voice"
-                          className="p-1.5 text-slate-400 hover:text-red-600 rounded-md transition-colors shrink-0"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div className="mt-3 space-y-2">
-                {STUDIO_VOICES.map((voice) => {
-                  const active = selectedPersonaId === null && selectedVoice === voice.id;
-                  return (
-                    <button
-                      key={voice.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedPersonaId(null);
-                        setSelectedVoice(voice.id);
-                        setStyleDirection(voice.samplePrompt);
-                      }}
-                      className={`w-full text-left px-3.5 py-2.5 rounded-lg border transition-colors ${
-                        active
-                          ? 'border-blue-600 bg-blue-50/50'
-                          : 'border-slate-200 bg-white hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-semibold text-slate-900">
-                          {voice.name}
-                        </span>
-                        <span className="text-xs text-slate-500">
-                          {voice.gender} · {voice.tone}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500 mt-0.5 truncate">
-                        {voice.bestFor}
-                      </p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="space-y-3 pt-2 border-t border-slate-100">
-              <div>
-                <label
-                  htmlFor="voice-style-input"
-                  className="block text-xs font-medium text-slate-600 mb-1.5"
-                >
-                  Voice Acting Direction (Emotion, Tone, Accent)
-                </label>
-                <input
-                  id="voice-style-input"
-                  type="text"
-                  value={styleDirection}
-                  onChange={(e) => setStyleDirection(e.target.value)}
-                  placeholder="e.g. Warm, emotional Bengali storyteller"
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <div className="mt-2.5 flex flex-wrap gap-1.5">
-                  {STYLE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => setStyleDirection(preset.style)}
-                      className="px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div>
-                  <span className="block text-xs font-medium text-slate-600 mb-1.5">
-                    Speaking Pace
-                  </span>
-                  <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-lg">
-                    {(['slow', 'natural', 'fast'] as const).map((p) => (
-                      <button
-                        key={p}
-                        type="button"
-                        onClick={() => setPace(p)}
-                        className={`py-1 text-xs font-medium rounded-md capitalize transition-colors ${
-                          pace === p
-                            ? 'bg-white text-slate-900 shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        {p}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <span className="block text-xs font-medium text-slate-600 mb-1.5">
-                    Emotion Level
-                  </span>
-                  <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-lg">
-                    {(['subtle', 'balanced', 'expressive'] as const).map((em) => (
-                      <button
-                        key={em}
-                        type="button"
-                        onClick={() => setEmotionLevel(em)}
-                        className={`py-1 text-xs font-medium rounded-md capitalize transition-colors ${
-                          emotionLevel === em
-                            ? 'bg-white text-slate-900 shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        {em === 'expressive' ? 'Rich' : em}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
+            <div className="flex-1 flex gap-2">
+              <input
+                type="text"
+                value={voiceDesignPrompt}
+                onChange={(e) => setVoiceDesignPrompt(e.target.value)}
+                placeholder="Describe any voice (e.g. Deep dramatic Bengali narrator, soft 7-year-old girl, cheerful YouTube host)..."
+                className="flex-1 min-w-0 px-3 py-2 text-xs bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+              />
+              <button
+                type="button"
+                onClick={handleDesignVoiceFromPrompt}
+                disabled={isDesigningVoice || !voiceDesignPrompt.trim()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{isDesigningVoice ? 'Designing...' : 'Design Voice'}</span>
+              </button>
             </div>
           </div>
 
-          {/* Right: Script Editor */}
-          <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-base font-semibold text-slate-900">
-                  2. Voiceover Script
-                </h2>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setScriptText(SAMPLE_SCRIPTS.bangla);
-                      setStyleDirection(
-                        'Warm, emotional Bengali storyteller with expressive pauses and natural rhythm'
-                      );
-                    }}
-                    className="px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
-                  >
-                    Bangla Sample
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setScriptText(SAMPLE_SCRIPTS.english)}
-                    className="px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
-                  >
-                    English Sample
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handlePolishScript}
-                    disabled={isPolishing || !scriptText.trim()}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:opacity-50 rounded-md transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <Wand2 className="w-3 h-3" />
-                    <span>{isPolishing ? 'Polishing...' : 'Polish Script'}</span>
-                  </button>
+          {/* ElevenLabs Split Speech Synthesis Layout: Main Editor (8 cols) + Right Settings Inspector (4 cols) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+            {/* Main Script Canvas */}
+            <div className="lg:col-span-8 bg-white border border-zinc-200 rounded-xl flex flex-col justify-between">
+              <div className="p-5 space-y-3 flex-1 flex flex-col">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-100">
+                  <span className="text-xs font-medium text-zinc-500">
+                    Write or paste Bangla / English script (supports &lt;breath&gt;, &lt;laugh&gt;, [curious], [softly])
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScriptText(SAMPLE_SCRIPTS.bangla);
+                        setStyleDirection(
+                          'Warm, emotional Bengali storyteller with expressive pauses and natural rhythm'
+                        );
+                      }}
+                      className="px-2.5 py-1 text-xs font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    >
+                      Bangla Sample
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScriptText(SAMPLE_SCRIPTS.english)}
+                      className="px-2.5 py-1 text-xs font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    >
+                      English Sample
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePolishScript}
+                      disabled={isPolishing || !scriptText.trim()}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-zinc-900 bg-zinc-100 hover:bg-zinc-200 disabled:opacity-50 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <Wand2 className="w-3 h-3" />
+                      <span>{isPolishing ? 'Polishing...' : 'Polish Script'}</span>
+                    </button>
+                  </div>
                 </div>
+
+                <textarea
+                  ref={textareaRef}
+                  value={scriptText}
+                  onChange={(e) => setScriptText(e.target.value)}
+                  rows={13}
+                  placeholder="Start typing here or paste any Bangla or English text you want to turn into lifelike speech..."
+                  className="w-full flex-1 min-h-[280px] py-2 text-base leading-relaxed bg-transparent text-zinc-950 placeholder:text-zinc-400 focus:outline-none resize-y"
+                />
               </div>
 
-              <textarea
-                ref={textareaRef}
-                value={scriptText}
-                onChange={(e) => setScriptText(e.target.value)}
-                rows={14}
-                placeholder="Write or paste your Bangla or English script here..."
-                className="w-full p-3.5 text-sm leading-relaxed bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-              />
-
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <div className="px-5 py-3.5 border-t border-zinc-200 bg-[#FAFAFA] rounded-b-xl flex flex-wrap items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-xs text-slate-500 mr-1">Insert reaction:</span>
                   {VOCAL_TAGS.map((item) => (
                     <button
                       key={item.tag}
                       type="button"
-                      onClick={() => {
-                        if (expressiveMode !== 'expressive') setExpressiveMode('expressive');
-                        insertVocalTag(item.tag);
-                      }}
-                      className="px-2 py-1 text-xs font-mono text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                      onClick={() => insertVocalTag(item.tag)}
+                      className="px-2 py-1 text-xs font-mono text-zinc-700 bg-white border border-zinc-200 hover:border-zinc-400 rounded-md transition-colors whitespace-nowrap shrink-0"
                     >
                       {item.tag}
                     </button>
                   ))}
                 </div>
-                <span className="text-xs font-mono tabular-nums text-slate-500">
-                  {scriptText.length} chars
-                </span>
+
+                <div className="flex items-center gap-4 shrink-0">
+                  <span className="text-xs font-mono tabular-nums text-zinc-500">
+                    {scriptText.length} characters
+                  </span>
+                  <button
+                    type="button"
+                    onClick={generateSpeech}
+                    disabled={isGenerating || !scriptText.trim()}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Volume2 className="w-4 h-4" />
+                    <span>{isGenerating ? 'Generating speech...' : 'Generate speech'}</span>
+                  </button>
+                </div>
               </div>
             </div>
 
-            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between gap-4">
-              <p className="text-xs text-slate-500">
-                24 kHz WAV · {selectedVoice} ({getVoiceGender(selectedVoice)}) ·{' '}
-                {expressiveMode === 'expressive' ? 'Voice Design' : 'Standard'}
-              </p>
-              <button
-                type="button"
-                onClick={generateSpeech}
-                disabled={isGenerating || !scriptText.trim()}
-                className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap shrink-0"
-              >
-                <Volume2 className="w-4 h-4" />
-                <span>{isGenerating ? 'Synthesizing Voice...' : 'Generate Voice'}</span>
-              </button>
+            {/* Right ElevenLabs Settings Inspector */}
+            <div className="lg:col-span-4 bg-[#FAFAFA] border border-zinc-200 rounded-xl p-5 space-y-5">
+              {/* Voice Selector */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="voice-inspector-select"
+                    className="text-xs font-semibold text-zinc-950"
+                  >
+                    Voice
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setStudioMode('persona')}
+                    className="text-xs font-medium text-zinc-600 hover:text-zinc-950 underline underline-offset-2 whitespace-nowrap shrink-0"
+                  >
+                    Match from Audio
+                  </button>
+                </div>
+
+                <select
+                  id="voice-inspector-select"
+                  value={selectedPersonaId ? `persona:${selectedPersonaId}` : `voice:${selectedVoice}`}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val.startsWith('persona:')) {
+                      const pid = val.slice(8);
+                      const p = customPersonas.find((item) => item.id === pid);
+                      if (p) {
+                        setSelectedPersonaId(p.id);
+                        setSelectedVoice(p.baseVoice);
+                        setStyleDirection(p.styleDirection);
+                      }
+                    } else {
+                      const vid = val.slice(6) as VoiceName;
+                      const v = STUDIO_VOICES.find((item) => item.id === vid);
+                      setSelectedPersonaId(null);
+                      setSelectedVoice(vid);
+                      if (v) setStyleDirection(v.samplePrompt);
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-sm font-medium bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                >
+                  {customPersonas.length > 0 && (
+                    <optgroup label="Designed & Matched Voices">
+                      {customPersonas.map((p) => (
+                        <option key={p.id} value={`persona:${p.id}`}>
+                          {p.name} ({getVoiceGender(p.baseVoice)} · {p.baseVoice})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="Studio Base Voices">
+                    {STUDIO_VOICES.map((v) => (
+                      <option key={v.id} value={`voice:${v.id}`}>
+                        {v.name} ({v.gender}) — {v.tone}
+                      </option>
+                    ))}
+                  </optgroup>
+                </select>
+
+                {selectedPersonaId && (
+                  <div className="flex items-center justify-between gap-2 text-xs text-zinc-500">
+                    <span className="truncate">
+                      Using designed profile ({selectedVoice})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomPersonas((prev) =>
+                          prev.filter((p) => p.id !== selectedPersonaId)
+                        );
+                        setSelectedPersonaId(null);
+                      }}
+                      className="text-red-600 hover:underline shrink-0"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Compact Model Switcher */}
+              <div className="border-t border-zinc-200 pt-4 space-y-2">
+                <label
+                  htmlFor="inspector-tts-model-select"
+                  className="block text-xs font-semibold text-zinc-950"
+                >
+                  TTS Model Version
+                </label>
+                <select
+                  id="inspector-tts-model-select"
+                  value={ttsModel}
+                  onChange={(e) => setTtsModel(e.target.value as TtsModelChoice)}
+                  className="w-full px-3 py-2 text-xs font-medium bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                >
+                  {TTS_MODEL_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-500 leading-snug">
+                  {activeModelMeta.subtitle}
+                </p>
+              </div>
+
+              {/* Acting Direction & Delivery Sliders */}
+              <div className="border-t border-zinc-200 pt-4 space-y-3">
+                <div>
+                  <label
+                    htmlFor="voice-style-input"
+                    className="block text-xs font-semibold text-zinc-950 mb-1.5"
+                  >
+                    Voice Acting Direction
+                  </label>
+                  <input
+                    id="voice-style-input"
+                    type="text"
+                    value={styleDirection}
+                    onChange={(e) => setStyleDirection(e.target.value)}
+                    placeholder="e.g. Warm, emotional Bengali storyteller"
+                    className="w-full px-3 py-2 text-xs bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                  />
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {STYLE_PRESETS.map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() => setStyleDirection(preset.style)}
+                        className="px-2 py-1 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:border-zinc-400 rounded-md transition-colors whitespace-nowrap shrink-0"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <span className="block text-xs font-medium text-zinc-600 mb-1.5">
+                      Speed
+                    </span>
+                    <div className="grid grid-cols-3 gap-1 p-1 bg-zinc-200/70 rounded-lg">
+                      {(['slow', 'natural', 'fast'] as const).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setPace(p)}
+                          className={`py-1 text-xs font-medium rounded-md capitalize transition-colors ${
+                            pace === p
+                              ? 'bg-white text-zinc-950 shadow-xs'
+                              : 'text-zinc-600 hover:text-zinc-950'
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-medium text-zinc-600 mb-1.5">
+                      Style Exaggeration
+                    </span>
+                    <div className="grid grid-cols-3 gap-1 p-1 bg-zinc-200/70 rounded-lg">
+                      {(['subtle', 'balanced', 'expressive'] as const).map((em) => (
+                        <button
+                          key={em}
+                          type="button"
+                          onClick={() => setEmotionLevel(em)}
+                          className={`py-1 text-xs font-medium rounded-md capitalize transition-colors ${
+                            emotionLevel === em
+                              ? 'bg-white text-zinc-950 shadow-xs'
+                              : 'text-zinc-600 hover:text-zinc-950'
+                          }`}
+                        >
+                          {em === 'expressive' ? 'Rich' : em}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
       {studioMode === 'dialogue' && (
-        /* Multi-Speaker Studio (2 up to 10 Speakers, Male & Female Voice Switching) */
+        /* Multi-Speaker Studio (2 up to 10 Speakers) */
         <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
-                  <Users className="w-4 h-4 text-blue-600" />
+                <h2 className="text-sm font-semibold text-zinc-950 flex items-center gap-2">
+                  <Users className="w-4 h-4 text-zinc-700" />
                   <span>Speakers Cast ({speakers.length}/10)</span>
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Add up to 10 characters with distinct Male &amp; Female voices and acting styles
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  Configure up to 10 characters with distinct Male &amp; Female voices · Model: {activeModelMeta.label}
                 </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={() => {
+                    const presetSpeakers: DialogueSpeaker[] = RIMI_TULTUL_STORY_PRESET.speakers.map(
+                      (s, idx) => ({
+                        id: `spk-story-${idx + 1}`,
+                        ...s,
+                      })
+                    );
+                    const parsed = parseScreenplayScript(
+                      RIMI_TULTUL_STORY_PRESET.rawScript,
+                      presetSpeakers
+                    );
+                    setSpeakers(parsed.speakers);
+                    setTurns(parsed.turns);
+                    if (parsed.turns[0]) setActiveTurnId(parsed.turns[0].id);
+                  }}
+                  className="px-2.5 py-1.5 text-xs font-medium text-zinc-950 bg-white border border-zinc-300 hover:border-zinc-950 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                >
+                  Bangla Story (রিমি ও তুলতুল)
+                </button>
+                <button
+                  type="button"
                   onClick={() => applyCastPreset(2)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   Female + Male Duo
                 </button>
                 <button
                   type="button"
                   onClick={() => applyCastPreset(4)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   4-Speaker Panel
                 </button>
                 <button
                   type="button"
                   onClick={() => applyCastPreset(10)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   10-Speaker Cast
                 </button>
@@ -1042,7 +1108,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   type="button"
                   onClick={addSpeaker}
                   disabled={speakers.length >= 10}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Speaker</span>
@@ -1054,17 +1120,17 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               {speakers.map((spk, idx) => (
                 <div
                   key={spk.id || idx}
-                  className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5"
+                  className="p-3.5 bg-white border border-zinc-200 rounded-lg space-y-2.5"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-mono tabular-nums font-medium text-slate-500">
+                    <span className="text-xs font-mono tabular-nums font-medium text-zinc-500">
                       Speaker {idx + 1} · {getVoiceGender(spk.voiceName)}
                     </span>
                     {speakers.length > 2 && spk.id && (
                       <button
                         type="button"
                         onClick={() => removeSpeaker(spk.id!)}
-                        className="p-1 text-slate-400 hover:text-red-600 rounded transition-colors"
+                        className="p-1 text-zinc-400 hover:text-red-600 rounded transition-colors"
                         title="Remove speaker"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1091,7 +1157,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                         );
                       }}
                       placeholder="Character name"
-                      className="px-2.5 py-1.5 text-xs font-medium bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="px-2.5 py-1.5 text-xs font-medium bg-white border border-zinc-200 rounded-md text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     />
                     <select
                       value={spk.voiceName}
@@ -1105,7 +1171,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                         )
                       }
                       aria-label={`Speaker ${idx + 1} voice`}
-                      className="px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="px-2.5 py-1.5 text-xs bg-white border border-zinc-200 rounded-md text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     >
                       {STUDIO_VOICES.map((v) => (
                         <option key={v.id} value={v.id}>
@@ -1126,25 +1192,32 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                       )
                     }
                     placeholder="Voice style (e.g. Calm female narrator, Excited male host)"
-                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-zinc-200 rounded-md text-zinc-700 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                   />
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Multi-Speaker Turns */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          {/* Multi-Speaker Script Lines */}
+          <div className="bg-white border border-zinc-200 rounded-xl p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-base font-semibold text-slate-900">
-                  Multi-Speaker Script Lines
+                <h3 className="text-sm font-semibold text-zinc-950">
+                  Dialogue Script
                 </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Each line switches automatically to the selected Male or Female speaker voice
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  Each turn automatically maps to the selected speaker &amp; emotion tone
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowScriptImporter((v) => !v)}
+                  className="px-2.5 py-1.5 text-xs font-medium text-zinc-950 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                >
+                  {showScriptImporter ? 'Hide Script Importer' : 'Paste Full Script'}
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -1157,7 +1230,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                     setTurns(nextTurns);
                     setActiveTurnId('bp1');
                   }}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   Bangla Female/Male Sample
                 </button>
@@ -1165,7 +1238,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   type="button"
                   onClick={handlePolishScript}
                   disabled={isPolishing}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-800 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>{isPolishing ? 'Formatting...' : 'Expand Script'}</span>
@@ -1173,7 +1246,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 <button
                   type="button"
                   onClick={addDialogueTurn}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Line</span>
@@ -1181,67 +1254,110 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               </div>
             </div>
 
-            <div className="space-y-3">
-              {turns.map((turn, idx) => (
-                <div key={turn.id} className="flex items-start gap-3">
-                  <select
-                    value={turn.speaker}
-                    onChange={(e) =>
-                      setTurns((prev) =>
-                        prev.map((t) =>
-                          t.id === turn.id ? { ...t, speaker: e.target.value } : t
-                        )
-                      )
-                    }
-                    aria-label={`Line ${idx + 1} speaker`}
-                    className="w-36 px-2.5 py-2 text-xs font-medium bg-slate-50 border border-slate-200 rounded-lg text-slate-800 shrink-0 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    {speakers.map((s, sIdx) => (
-                      <option key={s.id || sIdx} value={s.name}>
-                        {s.name} ({getVoiceGender(s.voiceName)})
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    value={turn.text}
-                    onFocus={() => setActiveTurnId(turn.id)}
-                    onChange={(e) =>
-                      setTurns((prev) =>
-                        prev.map((t) =>
-                          t.id === turn.id ? { ...t, text: e.target.value } : t
-                        )
-                      )
-                    }
-                    placeholder="Enter dialogue line..."
-                    className={`flex-1 px-3 py-2 text-sm bg-white border rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                      activeTurnId === turn.id ? 'border-blue-400' : 'border-slate-200'
-                    }`}
-                  />
+            {showScriptImporter && (
+              <div className="pt-3 border-t border-zinc-200 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-zinc-600">
+                    Paste your script with <span className="font-mono">[ন্যারেটর]:</span>,{' '}
+                    <span className="font-mono">[curious]</span>, <span className="font-mono">[softly]</span>,{' '}
+                    or <span className="font-mono">[দৃশ্য ১]</span> — labels and scene headers are stripped automatically.
+                  </p>
                   <button
                     type="button"
-                    onClick={() =>
-                      setTurns((prev) => prev.filter((t) => t.id !== turn.id))
-                    }
-                    disabled={turns.length <= 1}
-                    className="p-2 text-slate-400 hover:text-red-600 disabled:opacity-30 rounded-lg transition-colors"
-                    title="Remove line"
+                    onClick={() => {
+                      const parsed = parseScreenplayScript(rawScreenplayDraft, speakers);
+                      if (parsed.turns.length === 0) {
+                        setError('Could not detect any dialogue lines in the pasted script.');
+                        return;
+                      }
+                      setError(null);
+                      setSpeakers(parsed.speakers);
+                      setTurns(parsed.turns);
+                      setActiveTurnId(parsed.turns[0].id);
+                      setShowScriptImporter(false);
+                    }}
+                    className="px-3.5 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
                   >
-                    <Trash2 className="w-4 h-4" />
+                    Import &amp; Auto-Map Voices
                   </button>
+                </div>
+                <textarea
+                  rows={7}
+                  value={rawScreenplayDraft}
+                  onChange={(e) => setRawScreenplayDraft(e.target.value)}
+                  placeholder="[দৃশ্য ১]&#10;[ন্যারেটর]:&#10;[curious] রিমি চিৎকার করল না।"
+                  className="w-full p-3 text-xs leading-relaxed bg-[#FAFAFA] border border-zinc-200 rounded-lg text-zinc-950 focus:bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900 resize-y"
+                />
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {turns.map((turn, idx) => (
+                <div key={turn.id} className="space-y-1">
+                  <div className="flex items-start gap-3">
+                    <select
+                      value={turn.speaker}
+                      onChange={(e) =>
+                        setTurns((prev) =>
+                          prev.map((t) =>
+                            t.id === turn.id ? { ...t, speaker: e.target.value } : t
+                          )
+                        )
+                      }
+                      aria-label={`Line ${idx + 1} speaker`}
+                      className="w-40 px-2.5 py-2 text-xs font-medium bg-[#FAFAFA] border border-zinc-200 rounded-lg text-zinc-900 shrink-0 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                    >
+                      {speakers.map((s, sIdx) => (
+                        <option key={s.id || sIdx} value={s.name}>
+                          {s.name} ({getVoiceGender(s.voiceName)})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      value={turn.text}
+                      onFocus={() => setActiveTurnId(turn.id)}
+                      onChange={(e) =>
+                        setTurns((prev) =>
+                          prev.map((t) =>
+                            t.id === turn.id ? { ...t, text: e.target.value } : t
+                          )
+                        )
+                      }
+                      placeholder="Enter dialogue line (optional [warmly], [softly] emotion tags)..."
+                      className={`flex-1 px-3 py-2 text-sm bg-white border rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 ${
+                        activeTurnId === turn.id ? 'border-zinc-900' : 'border-zinc-200'
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTurns((prev) => prev.filter((t) => t.id !== turn.id))
+                      }
+                      disabled={turns.length <= 1}
+                      className="p-2 text-zinc-400 hover:text-red-600 disabled:opacity-30 rounded-lg transition-colors"
+                      title="Remove line"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                  {turn.emotionHint && (
+                    <p className="text-xs text-zinc-500 pl-43">
+                      Acting tone: {turn.emotionHint}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
 
-            <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
+            <div className="pt-3 border-t border-zinc-100 flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-slate-500 mr-1">Insert reaction:</span>
                 {VOCAL_TAGS.map((item) => (
                   <button
                     key={item.tag}
                     type="button"
                     onClick={() => insertVocalTag(item.tag)}
-                    className="px-2 py-1 text-xs font-mono text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    className="px-2 py-1 text-xs font-mono text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-md transition-colors whitespace-nowrap shrink-0"
                   >
                     {item.tag}
                   </button>
@@ -1251,13 +1367,13 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 type="button"
                 onClick={generateSpeech}
                 disabled={isGenerating}
-                className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Volume2 className="w-4 h-4" />
                 <span>
                   {isGenerating
                     ? `Synthesizing ${speakers.length}-Speaker Mix...`
-                    : 'Generate Multi-Speaker Audio'}
+                    : 'Generate Multi-Speaker Speech'}
                 </span>
               </button>
             </div>
@@ -1267,14 +1383,14 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
 
       {studioMode === 'shift' && (
         /* Single Speaker shifting across different vocal tones, characters, & moods */
-        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-5">
+        <div className="bg-white border border-zinc-200 rounded-xl p-5 space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">
-                One Speaker · Multi-Voice Shifting
+              <h2 className="text-sm font-semibold text-zinc-950">
+                Voice-Shifting Storyteller
               </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Let one storyteller switch seamlessly between narrating, whispering, cheerful youth, deep dramatic male, or gentle female tones line by line
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Shift seamlessly between narrating, whispering, youthful, deep male, or gentle female tones line by line · Model: {activeModelMeta.label}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1288,7 +1404,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   setShiftSegments(demo);
                   setActiveSegmentId(demo[0].id);
                 }}
-                className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 text-xs font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 Bangla Story Demo
               </button>
@@ -1309,7 +1425,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   ]);
                   setActiveSegmentId(newId);
                 }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Add Voice Segment</span>
@@ -1323,13 +1439,13 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 key={seg.id}
                 className={`p-3.5 rounded-lg border space-y-2.5 transition-colors ${
                   activeSegmentId === seg.id
-                    ? 'border-blue-400 bg-blue-50/20'
-                    : 'border-slate-200 bg-slate-50/70'
+                    ? 'border-zinc-900 bg-white'
+                    : 'border-zinc-200 bg-[#FAFAFA]'
                 }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-mono tabular-nums text-slate-500">
+                    <span className="text-xs font-mono tabular-nums text-zinc-500">
                       #{idx + 1}
                     </span>
                     <select
@@ -1351,7 +1467,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                         );
                       }}
                       aria-label={`Segment ${idx + 1} voice character`}
-                      className="px-2.5 py-1.5 text-xs font-medium bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="px-2.5 py-1.5 text-xs font-medium bg-white border border-zinc-200 rounded-md text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     >
                       {VOICE_SHIFT_PRESETS.map((p) => (
                         <option key={p.label} value={p.label}>
@@ -1370,7 +1486,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                         )
                       }
                       placeholder="Custom tone/emotion for this line..."
-                      className="w-64 sm:w-80 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-64 sm:w-80 px-2.5 py-1.5 text-xs bg-white border border-zinc-200 rounded-md text-zinc-700 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                     />
                   </div>
                   <button
@@ -1379,7 +1495,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                       setShiftSegments((prev) => prev.filter((item) => item.id !== seg.id))
                     }
                     disabled={shiftSegments.length <= 1}
-                    className="p-1 text-slate-400 hover:text-red-600 disabled:opacity-30 rounded transition-colors"
+                    className="p-1 text-zinc-400 hover:text-red-600 disabled:opacity-30 rounded transition-colors"
                     title="Remove segment"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -1398,21 +1514,20 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                     )
                   }
                   placeholder="Write Bangla or English line for this voice tone..."
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                  className="w-full px-3 py-2 text-sm bg-white border border-zinc-200 rounded-md text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 resize-y"
                 />
               </div>
             ))}
           </div>
 
-          <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
+          <div className="pt-3 border-t border-zinc-100 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-xs text-slate-500 mr-1">Insert reaction:</span>
               {VOCAL_TAGS.map((item) => (
                 <button
                   key={item.tag}
                   type="button"
                   onClick={() => insertVocalTag(item.tag)}
-                  className="px-2 py-1 text-xs font-mono text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                  className="px-2 py-1 text-xs font-mono text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-md transition-colors whitespace-nowrap shrink-0"
                 >
                   {item.tag}
                 </button>
@@ -1422,11 +1537,11 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               type="button"
               onClick={generateSpeech}
               disabled={isGenerating}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
               <Volume2 className="w-4 h-4" />
               <span>
-                {isGenerating ? 'Synthesizing Voice Shifts...' : 'Generate Voice-Shifting Audio'}
+                {isGenerating ? 'Generating Voice Shifts...' : 'Generate Voice-Shifting Speech'}
               </span>
             </button>
           </div>
@@ -1435,12 +1550,12 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
 
       {studioMode === 'persona' && (
         /* Reference Voice Persona Matcher */
-        <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
+        <div className="bg-white border border-zinc-200 rounded-xl p-6 space-y-5">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">
+            <h2 className="text-sm font-semibold text-zinc-950">
               Match Voice Style from Reference Audio
             </h2>
-            <p className="text-sm text-slate-500 mt-1 max-w-2xl">
+            <p className="text-xs text-zinc-500 mt-1 max-w-2xl leading-relaxed">
               Upload or record a 5–20 second sample of any voice. The studio analyzes its pitch, pace, warmth, and cadence, matches the closest studio voice model, and saves a reusable custom persona.
             </p>
           </div>
@@ -1450,7 +1565,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               <div>
                 <label
                   htmlFor="persona-name-input"
-                  className="block text-xs font-medium text-slate-600 mb-1.5"
+                  className="block text-xs font-medium text-zinc-600 mb-1.5"
                 >
                   Persona Name
                 </label>
@@ -1460,7 +1575,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   value={personaName}
                   onChange={(e) => setPersonaName(e.target.value)}
                   placeholder="e.g. Dhaka Tech Host"
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 text-sm bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                 />
               </div>
 
@@ -1478,7 +1593,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 <button
                   type="button"
                   onClick={() => sampleInputRef.current?.click()}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <Upload className="w-3.5 h-3.5" />
                   <span>Upload Voice Sample</span>
@@ -1488,7 +1603,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   <button
                     type="button"
                     onClick={startSampleRecording}
-                    className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
                   >
                     <Mic className="w-3.5 h-3.5" />
                     <span>Record Sample</span>
@@ -1508,13 +1623,13 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               </div>
             </div>
 
-            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 flex flex-col justify-between">
+            <div className="bg-[#FAFAFA] border border-zinc-200 rounded-lg p-4 flex flex-col justify-between">
               <div>
-                <p className="text-xs font-medium text-slate-500">Reference Sample</p>
-                <p className="text-sm font-medium text-slate-900 mt-1 truncate">
+                <p className="text-xs font-medium text-zinc-500">Reference Sample</p>
+                <p className="text-sm font-medium text-zinc-950 mt-1 truncate">
                   {sampleFile ? sampleFile.name : 'No audio sample selected yet'}
                 </p>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-xs text-zinc-500 mt-0.5">
                   {sampleFile
                     ? `${(sampleFile.size / 1024).toFixed(1)} KB ready for vocal profile extraction`
                     : 'Clear speech in Bangla or English gives the best vocal match'}
@@ -1525,7 +1640,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 type="button"
                 onClick={createPersonaFromSample}
                 disabled={isMatchingPersona || !sampleFile}
-                className="mt-4 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap"
+                className="mt-4 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 text-white text-xs font-medium rounded-lg transition-colors whitespace-nowrap"
               >
                 <UserCheck className="w-4 h-4" />
                 <span>
@@ -1542,7 +1657,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
       {error && (
         <div
           role="alert"
-          className="flex items-start gap-2.5 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"
+          className="flex items-start gap-2.5 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700"
         >
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{error}</span>
@@ -1551,9 +1666,9 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
 
       {/* Loading Skeleton */}
       {isGenerating && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-          <div className="h-5 w-44 bg-slate-200 rounded animate-pulse" />
-          <div className="h-14 w-full bg-slate-100 rounded-lg animate-pulse" />
+        <div className="bg-white border border-zinc-200 rounded-xl p-5 space-y-3">
+          <div className="h-5 w-44 bg-zinc-200 rounded animate-pulse" />
+          <div className="h-14 w-full bg-zinc-100 rounded-lg animate-pulse" />
         </div>
       )}
 
@@ -1567,15 +1682,16 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
             downloadLabel="Download .WAV"
           />
 
-          <div className="bg-white border border-slate-200 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs text-slate-500">
-              Need synchronized captions for this voiceover? Send it directly to the SRT Subtitle Generator.
+          <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-zinc-500">
+              {lastModelUsed ? `Rendered with ${lastModelUsed} · ` : ''}
+              Need synchronized captions for this voiceover? Send it straight to Audio to SRT.
             </p>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 onClick={downloadWav}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Save WAV</span>
@@ -1583,7 +1699,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
               <button
                 type="button"
                 onClick={forwardToSrtStudio}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Subtitles className="w-3.5 h-3.5" />
                 <span>Generate .SRT from this Voice</span>

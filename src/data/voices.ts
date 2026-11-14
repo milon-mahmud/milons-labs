@@ -167,3 +167,63 @@ export const BANGLA_VOICE_SHIFT_DEMO = [
     text: 'আর সেদিনই বুঝেছিলাম, প্রকৃত বন্ধুত্ব কোনো সময় বা দূরত্ব মানে না।',
   },
 ];
+
+export const RIMI_TULTUL_STORY_PRESET = {
+  speakers: [
+    {
+      name: 'ন্যারেটর',
+      voiceName: 'Kore' as const,
+      style:
+        'Warm, expressive female Bengali storyteller, Shuddho Bangla pronunciation, smooth emotional rhythm',
+    },
+    {
+      name: 'রিমি',
+      voiceName: 'Zephyr' as const,
+      style:
+        'Sweet, innocent 7-year-old Bengali girl voice, bright youthful pitch, lively clear Bangla diction',
+    },
+    {
+      name: 'তুলতুল',
+      voiceName: 'Zephyr' as const,
+      style:
+        'Soft, airy, gentle whisper-like cute child voice, shy and sweet Bengali tone with delicate pauses',
+    },
+    {
+      name: 'দোকানদার কাকা রহিম',
+      voiceName: 'Fenrir' as const,
+      style:
+        'Deep, friendly 40-year-old Bangladeshi village shopkeeper male voice, warm conversational Bangla',
+    },
+    {
+      name: 'দাদু',
+      voiceName: 'Charon' as const,
+      style:
+        'Warm, wise 65-year-old Bengali grandfather voice, calm unhurried elderly cadence, affectionate depth',
+    },
+  ],
+  rawScript: `[দৃশ্য ১]
+[ন্যারেটর]:
+[curious] রিমি চিৎকার করল না।
+[softly] সে শুধু চোখ বড় বড় করে তাকিয়ে রইল, তারপর জিজ্ঞেস করল,
+
+[রিমি]:
+[curious] তুমিই কি সেদিন ঘুড়িটা এনেছিলে?
+
+[ন্যারেটর]:
+[warmly] তুলতুল মাথা নাড়ল, আর এই প্রথম কেউ তাকে সামনাসামনি কিছু জিজ্ঞেস করেছে।
+
+[তুলতুল]:
+[shy] আমি শুধু... তোমাদের সঙ্গে খেলতে চেয়েছিলাম, বুঝলে?
+
+[ন্যারেটর]:
+[relieved] তুলতুলের আলোয় বাঁশঝাড়ের ভেতরটা পরিষ্কার দেখা গেল।
+[cheerful] মিঠু একটা শুকনো ডালের ফাঁকে আটকে বসে ছিল।
+[warmly] রিমি ওকে বুকে তুলে নিল, তারপর হাত বাড়িয়ে দিয়ে বলল,
+
+[রিমি]:
+[cheerful] আমার নাম রিমি। তোমার?
+
+[তুলতুল]:
+[happy] তুলতুল।`,
+};
+
