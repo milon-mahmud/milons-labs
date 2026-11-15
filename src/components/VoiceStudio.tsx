@@ -18,6 +18,7 @@ import {
   BANGLA_VOICE_SHIFT_DEMO,
   RIMI_TULTUL_STORY_PRESET,
   SAMPLE_SCRIPTS,
+  STORY_CHARACTER_PERSONAS,
   STUDIO_VOICES,
   STYLE_PRESETS,
   VOCAL_TAGS,
@@ -139,9 +140,12 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
   const [customPersonas, setCustomPersonas] = useState<CustomVoicePersona[]>(() => {
     try {
       const raw = localStorage.getItem(PERSONA_STORAGE_KEY);
-      return raw ? (JSON.parse(raw) as CustomVoicePersona[]) : [];
+      const saved = raw ? (JSON.parse(raw) as CustomVoicePersona[]) : [];
+      const savedIds = new Set(saved.map((p) => p.id));
+      const missingCharacters = STORY_CHARACTER_PERSONAS.filter((c) => !savedIds.has(c.id));
+      return [...saved, ...missingCharacters];
     } catch {
-      return [];
+      return [...STORY_CHARACTER_PERSONAS];
     }
   });
 
@@ -747,31 +751,86 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
       {studioMode === 'single' && (
         <div className="space-y-5">
           {/* Top Voice Design Bar — always visible above the script editor */}
-          <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl px-4 py-3.5 flex flex-col md:flex-row md:items-center gap-3">
-            <div className="md:w-56 shrink-0">
-              <p className="text-xs font-semibold text-zinc-950">
-                Design Voice from Prompt
-              </p>
-              <p className="text-xs text-zinc-500">
-                Auto-selects Male/Female &amp; tone
-              </p>
+          <div className="bg-[#FAFAFA] border border-zinc-200 rounded-xl px-4 py-3.5 space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center gap-3">
+              <div className="md:w-56 shrink-0">
+                <p className="text-xs font-semibold text-zinc-950">
+                  Design Voice from Prompt
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Auto-selects Male/Female &amp; tone
+                </p>
+              </div>
+              <div className="flex-1 flex gap-2">
+                <input
+                  type="text"
+                  value={voiceDesignPrompt}
+                  onChange={(e) => setVoiceDesignPrompt(e.target.value)}
+                  placeholder="Describe any voice (e.g. Deep dramatic Bengali narrator, soft 7-year-old girl, cheerful YouTube host)..."
+                  className="flex-1 min-w-0 px-3 py-2 text-xs bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                />
+                <button
+                  type="button"
+                  onClick={handleDesignVoiceFromPrompt}
+                  disabled={isDesigningVoice || !voiceDesignPrompt.trim()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{isDesigningVoice ? 'Designing...' : 'Design Voice'}</span>
+                </button>
+              </div>
             </div>
-            <div className="flex-1 flex gap-2">
-              <input
-                type="text"
-                value={voiceDesignPrompt}
-                onChange={(e) => setVoiceDesignPrompt(e.target.value)}
-                placeholder="Describe any voice (e.g. Deep dramatic Bengali narrator, soft 7-year-old girl, cheerful YouTube host)..."
-                className="flex-1 min-w-0 px-3 py-2 text-xs bg-white border border-zinc-200 rounded-lg text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900"
-              />
+
+            <div className="pt-2.5 border-t border-zinc-200/80 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-medium text-zinc-500 mr-1">
+                  Story Character Voices:
+                </span>
+                {STORY_CHARACTER_PERSONAS.map((charVoice) => {
+                  const isActive = selectedPersonaId === charVoice.id;
+                  return (
+                    <button
+                      key={charVoice.id}
+                      type="button"
+                      title={charVoice.summary}
+                      onClick={() => {
+                        setCustomPersonas((prev) =>
+                          prev.some((p) => p.id === charVoice.id) ? prev : [charVoice, ...prev]
+                        );
+                        setSelectedPersonaId(charVoice.id);
+                        setSelectedVoice(charVoice.baseVoice);
+                        setStyleDirection(charVoice.styleDirection);
+                      }}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+                        isActive
+                          ? 'bg-zinc-950 text-white border-zinc-950'
+                          : 'bg-white text-zinc-700 border-zinc-200 hover:border-zinc-400 hover:text-zinc-950'
+                      }`}
+                    >
+                      {charVoice.name}
+                    </button>
+                  );
+                })}
+              </div>
               <button
                 type="button"
-                onClick={handleDesignVoiceFromPrompt}
-                disabled={isDesigningVoice || !voiceDesignPrompt.trim()}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                onClick={() => {
+                  const nextSpeakers = RIMI_TULTUL_STORY_PRESET.speakers.map((s, idx) => ({
+                    id: `spk-story-${idx + 1}`,
+                    ...s,
+                  }));
+                  const parsed = parseScreenplayScript(
+                    RIMI_TULTUL_STORY_PRESET.rawScript,
+                    nextSpeakers
+                  );
+                  setSpeakers(parsed.speakers);
+                  setTurns(parsed.turns);
+                  setActiveTurnId(parsed.turns[0]?.id || '');
+                  setStudioMode('dialogue');
+                }}
+                className="text-xs font-medium text-zinc-700 hover:text-zinc-950 underline underline-offset-2 whitespace-nowrap shrink-0"
               >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>{isDesigningVoice ? 'Designing...' : 'Design Voice'}</span>
+                Open Full Story Cast (Multi-Speaker)
               </button>
             </div>
           </div>

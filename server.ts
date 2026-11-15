@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
+import http from 'node:http';
 import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1188,13 +1189,33 @@ async function startServer() {
     }
   });
 
+  const httpServer = http.createServer(app);
+
   if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    let viteInitError: unknown = null;
+    const vitePromise = (async () => {
+      const { createServer: createViteServer } = await import('vite');
+      return createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+        },
+        appType: 'spa',
+      });
+    })().catch((err) => {
+      viteInitError = err;
+      console.error('Failed to initialize Vite dev middleware:', err);
+      return null;
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      const vite = await vitePromise;
+      if (!vite) {
+        next(viteInitError ?? new Error('Vite dev middleware failed to initialize.'));
+        return;
+      }
+      vite.middlewares(req, res, next);
+    });
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
@@ -1203,7 +1224,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(
       `Milons Labs server running on http://localhost:${PORT} (${getConfiguredGeminiKeys().length} Gemini key(s) configured)`
     );

@@ -1,4 +1,4 @@
-import type { VoiceProfile } from '../types/studio';
+import type { CustomVoicePersona, VoiceProfile } from '../types/studio';
 
 export const STUDIO_VOICES: VoiceProfile[] = [
   {
@@ -168,37 +168,94 @@ export const BANGLA_VOICE_SHIFT_DEMO = [
   },
 ];
 
+export const STORY_CHARACTER_PERSONAS: CustomVoicePersona[] = [
+  {
+    id: 'char-narrator',
+    name: 'ন্যারেটর (গল্পকথক)',
+    baseVoice: 'Kore',
+    styleDirection:
+      'Warm, expressive female Bengali storyteller, Shuddho Bangla pronunciation, smooth emotional rhythm and gentle pauses',
+    summary: 'মূল গল্পকথক — মহিলা, উষ্ণ ও আবেগপূর্ণ গল্পবলার কণ্ঠ',
+    createdAt: 1731600001000,
+  },
+  {
+    id: 'char-rimi',
+    name: 'রিমি (৭ বছর)',
+    baseVoice: 'Kore',
+    styleDirection:
+      'Bright, curious, cheerful 7-year-old Bengali little girl voice, higher youthful pitch, lively innocent energy and crisp Shuddho Bangla',
+    summary: '৭ বছর বয়সী মূল চরিত্র — লাল ফ্রক, দুই বেণী, চঞ্চল ও কৌতূহলী ছোট মেয়ের কণ্ঠ',
+    createdAt: 1731600002000,
+  },
+  {
+    id: 'char-tultul',
+    name: 'তুলতুল (মিষ্টি ভূত)',
+    baseVoice: 'Zephyr',
+    styleDirection:
+      'Soft, airy, gentle whisper-like cute 7-year-old friendly ghost voice, shy timid breathy cadence and sweet innocent Bengali tone',
+    summary: 'আনুমানিক ৭ বছরের মিষ্টি বন্ধুহীন ভূত — নরম, ফিসফিসে ও লাজুক হালকা কণ্ঠ',
+    createdAt: 1731600003000,
+  },
+  {
+    id: 'char-dadu',
+    name: 'দাদু (৬৫ বছর)',
+    baseVoice: 'Charon',
+    styleDirection:
+      'Warm, wise 65-year-old Bengali grandfather voice, calm unhurried elderly cadence, affectionate depth and gentle authority',
+    summary: '৬৫ বছর বয়সী রিমির দাদু — সাদা পাঞ্জাবি ও গোল চশমা, স্নেহশীল বয়স্ক পুরুষ কণ্ঠ',
+    createdAt: 1731600004000,
+  },
+  {
+    id: 'char-rahim',
+    name: 'দোকানদার কাকা রহিম (৪০ বছর)',
+    baseVoice: 'Fenrir',
+    styleDirection:
+      'Deep, hearty 40-year-old Bangladeshi village shopkeeper male voice, warm friendly chest resonance and natural conversational Bangla',
+    summary: '৪০ বছর বয়সী গ্রামের দোকানদার — নীল শার্ট ও টুপি, গভীর ও প্রাণবন্ত পুরুষ কণ্ঠ',
+    createdAt: 1731600005000,
+  },
+  {
+    id: 'char-mithu',
+    name: 'মিঠু (বিড়ালছানা)',
+    baseVoice: 'Puck',
+    styleDirection:
+      'Tiny, playful, super-cute 3-month-old animated kitten character voice, bright cheerful high-energy chirps and sweet innocent Bengali delivery',
+    summary: '৩ মাস বয়সী কমলা-সাদা আদরের বিড়ালছানা — মিষ্টি, প্রাণবন্ত ছোট্ট কার্টুন কণ্ঠ',
+    createdAt: 1731600006000,
+  },
+];
+
 export const RIMI_TULTUL_STORY_PRESET = {
   speakers: [
     {
       name: 'ন্যারেটর',
       voiceName: 'Kore' as const,
       style:
-        'Warm, expressive female Bengali storyteller, Shuddho Bangla pronunciation, smooth emotional rhythm',
+        'Warm, expressive female Bengali storyteller, Shuddho Bangla pronunciation, smooth emotional rhythm and gentle pauses',
     },
     {
       name: 'রিমি',
-      voiceName: 'Zephyr' as const,
+      voiceName: 'Kore' as const,
       style:
-        'Sweet, innocent 7-year-old Bengali girl voice, bright youthful pitch, lively clear Bangla diction',
+        'Bright, curious, cheerful 7-year-old Bengali little girl voice, higher youthful pitch, lively innocent energy and crisp Shuddho Bangla',
     },
     {
       name: 'তুলতুল',
       voiceName: 'Zephyr' as const,
       style:
-        'Soft, airy, gentle whisper-like cute child voice, shy and sweet Bengali tone with delicate pauses',
+        'Soft, airy, gentle whisper-like cute 7-year-old friendly ghost voice, shy timid breathy cadence and sweet innocent Bengali tone',
     },
     {
       name: 'দোকানদার কাকা রহিম',
       voiceName: 'Fenrir' as const,
       style:
-        'Deep, friendly 40-year-old Bangladeshi village shopkeeper male voice, warm conversational Bangla',
+        'Deep, hearty 40-year-old Bangladeshi village shopkeeper male voice, warm friendly chest resonance and natural conversational Bangla',
     },
     {
       name: 'দাদু',
       voiceName: 'Charon' as const,
       style:
-        'Warm, wise 65-year-old Bengali grandfather voice, calm unhurried elderly cadence, affectionate depth',
+        'Warm, wise 65-year-old Bengali grandfather voice, calm unhurried elderly cadence, affectionate depth and gentle authority',
     },
   ],
   rawScript: `[দৃশ্য ১]
