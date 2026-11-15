@@ -37,16 +37,17 @@ export function inferCharacterVoiceProfile(speakerName: string): {
   const lower = speakerName.toLowerCase();
 
   if (
+    lower.includes('রিমঝিম') ||
+    lower.includes('rimjhim') ||
     lower.includes('রিমি') ||
     lower.includes('rimi') ||
     lower.includes('খুকি') ||
-    lower.includes('বাচ্চা') ||
     lower.includes('মেয়ে')
   ) {
     return {
-      voiceName: 'Zephyr',
+      voiceName: 'Kore',
       style:
-        'Sweet, innocent 7-year-old Bengali girl voice, bright youthful pitch, expressive playful Bangla diction',
+        'Bright, curious, cheerful 7-year-old Bengali village girl voice, innocent clear pitch, lively energy and crisp Shuddho Bangla',
     };
   }
 
@@ -59,7 +60,59 @@ export function inferCharacterVoiceProfile(speakerName: string): {
     return {
       voiceName: 'Zephyr',
       style:
-        'Soft, airy, gentle whisper-like cute child voice, shy and sweet Bengali tone with delicate pauses',
+        'Soft, airy, gentle whisper-like cute 7-year-old floating ghost voice, shy sweet breathy cadence and delicate Bangla tone',
+    };
+  }
+
+  if (
+    lower.includes('ভুলো') ||
+    lower.includes('bhulo') ||
+    lower.includes('কুকুর') ||
+    lower.includes('মিঠু') ||
+    lower.includes('mithu')
+  ) {
+    return {
+      voiceName: 'Puck',
+      style:
+        'Playful, loyal, adorable young pet animated character voice, lively bouncy inflection and warm cheerful energy',
+    };
+  }
+
+  if (
+    lower.includes('পিকলু') ||
+    lower.includes('piklu')
+  ) {
+    return {
+      voiceName: 'Puck',
+      style:
+        'Cheeky, mischievous, fast-talking energetic 8-year-old boy voice, playful teasing tone and expressive youthful bursts',
+    };
+  }
+
+  if (
+    lower.includes('বাপ্পা') ||
+    lower.includes('bappa') ||
+    lower.includes('ছেলে')
+  ) {
+    return {
+      voiceName: 'Puck',
+      style:
+        'Bright, friendly, sincere 8-year-old village boy voice, lively youthful pitch and natural enthusiastic Bangla',
+    };
+  }
+
+  if (
+    lower.includes('ঠাম্মি') ||
+    lower.includes('thammi') ||
+    lower.includes('দিদা') ||
+    lower.includes('দাদি') ||
+    lower.includes('বৃদ্ধা') ||
+    lower.includes('grandmother')
+  ) {
+    return {
+      voiceName: 'Zephyr',
+      style:
+        'Warm, wise, deeply affectionate 65-year-old Bengali grandmother voice, calm unhurried storytelling cadence and loving warmth',
     };
   }
 
@@ -78,6 +131,33 @@ export function inferCharacterVoiceProfile(speakerName: string): {
   }
 
   if (
+    lower.includes('ড.') ||
+    lower.includes('রহমান') ||
+    lower.includes('rahman') ||
+    lower.includes('doctor') ||
+    lower.includes('বিজ্ঞানী')
+  ) {
+    return {
+      voiceName: 'Charon',
+      style:
+        'Calm, articulate, intelligent 38-year-old Bengali scientist and mentor voice, reassuring clarity and steady thoughtful pacing',
+    };
+  }
+
+  if (
+    lower.includes('রেঞ্জার') ||
+    lower.includes('করিম') ||
+    lower.includes('ranger') ||
+    lower.includes('karim')
+  ) {
+    return {
+      voiceName: 'Fenrir',
+      style:
+        'Strong, warm-hearted, grounded 35-year-old nature ranger male voice, confident outdoor vitality and natural conversational Bangla',
+    };
+  }
+
+  if (
     lower.includes('দোকানদার') ||
     lower.includes('রহিম') ||
     lower.includes('কাকা') ||
@@ -88,6 +168,18 @@ export function inferCharacterVoiceProfile(speakerName: string): {
       voiceName: 'Fenrir',
       style:
         'Deep, friendly 40-year-old Bangladeshi village shopkeeper male voice, warm conversational Bangla tone',
+    };
+  }
+
+  if (
+    lower.includes('মা') ||
+    lower.includes('mother') ||
+    lower.includes('আম্মু')
+  ) {
+    return {
+      voiceName: 'Kore',
+      style:
+        'Tender, loving, soothing 35-year-old Bengali mother voice, gentle maternal warmth and crisp natural Bangla',
     };
   }
 
@@ -253,10 +345,10 @@ export function parseScreenplayScript(
   // Cap speakers list at 10 while ensuring at least 2 speakers for Multi-Speaker mode
   let finalSpeakers = Array.from(speakerMap.values()).slice(0, 10);
   if (finalSpeakers.length === 1) {
-    const fallback = inferCharacterVoiceProfile('রিমি');
+    const fallback = inferCharacterVoiceProfile('রিমঝিম');
     finalSpeakers.push({
       id: `spk-2-${Date.now()}`,
-      name: finalSpeakers[0].name === 'রিমি' ? 'ন্যারেটর' : 'রিমি',
+      name: finalSpeakers[0].name === 'রিমঝিম' ? 'ন্যারেটর' : 'রিমঝিম',
       voiceName: fallback.voiceName,
       style: fallback.style,
     });

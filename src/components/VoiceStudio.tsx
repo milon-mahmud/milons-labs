@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Check,
   Volume2,
   Sparkles,
   Plus,
@@ -13,12 +14,13 @@ import {
   Upload,
   UserCheck,
   Users,
+  X,
 } from 'lucide-react';
 import {
   BANGLA_VOICE_SHIFT_DEMO,
+  CHARACTER_VOICE_CATALOG,
   RIMI_TULTUL_STORY_PRESET,
   SAMPLE_SCRIPTS,
-  STORY_CHARACTER_PERSONAS,
   STUDIO_VOICES,
   STYLE_PRESETS,
   VOCAL_TAGS,
@@ -36,7 +38,8 @@ import type {
   VoiceShiftSegment,
 } from '../types/studio';
 
-const PERSONA_STORAGE_KEY = 'voxcraft_custom_personas_v1';
+const PERSONA_STORAGE_KEY = 'milons_custom_personas_v2';
+const LEGACY_PERSONA_STORAGE_KEY = 'voxcraft_custom_personas_v1';
 
 type TtsModelChoice =
   | 'auto'
@@ -139,15 +142,25 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
 
   const [customPersonas, setCustomPersonas] = useState<CustomVoicePersona[]>(() => {
     try {
-      const raw = localStorage.getItem(PERSONA_STORAGE_KEY);
-      const saved = raw ? (JSON.parse(raw) as CustomVoicePersona[]) : [];
-      const savedIds = new Set(saved.map((p) => p.id));
-      const missingCharacters = STORY_CHARACTER_PERSONAS.filter((c) => !savedIds.has(c.id));
-      return [...saved, ...missingCharacters];
+      const rawV2 = localStorage.getItem(PERSONA_STORAGE_KEY);
+      if (rawV2) {
+        return JSON.parse(rawV2) as CustomVoicePersona[];
+      }
+      const rawV1 = localStorage.getItem(LEGACY_PERSONA_STORAGE_KEY);
+      const legacySaved = rawV1 ? (JSON.parse(rawV1) as CustomVoicePersona[]) : [];
+      const userCreatedOnly = legacySaved.filter((p) => !p.id.startsWith('char-'));
+      return [...userCreatedOnly, ...CHARACTER_VOICE_CATALOG.slice(0, 8)];
     } catch {
-      return [...STORY_CHARACTER_PERSONAS];
+      return CHARACTER_VOICE_CATALOG.slice(0, 8);
     }
   });
+
+  const [showCharacterLibrary, setShowCharacterLibrary] = useState(false);
+  const [showCastLibrary, setShowCastLibrary] = useState(false);
+  const [customCharName, setCustomCharName] = useState('');
+  const [customCharRole, setCustomCharRole] = useState('');
+  const [customCharVoice, setCustomCharVoice] = useState<VoiceName>('Kore');
+  const [customCharStyle, setCustomCharStyle] = useState('');
 
   useEffect(() => {
     try {
@@ -784,33 +797,59 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
             <div className="pt-2.5 border-t border-zinc-200/80 flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs font-medium text-zinc-500 mr-1">
-                  Story Character Voices:
+                  My Character Voices ({customPersonas.length}):
                 </span>
-                {STORY_CHARACTER_PERSONAS.map((charVoice) => {
+                {customPersonas.map((charVoice) => {
                   const isActive = selectedPersonaId === charVoice.id;
                   return (
-                    <button
+                    <div
                       key={charVoice.id}
-                      type="button"
-                      title={charVoice.summary}
-                      onClick={() => {
-                        setCustomPersonas((prev) =>
-                          prev.some((p) => p.id === charVoice.id) ? prev : [charVoice, ...prev]
-                        );
-                        setSelectedPersonaId(charVoice.id);
-                        setSelectedVoice(charVoice.baseVoice);
-                        setStyleDirection(charVoice.styleDirection);
-                      }}
-                      className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+                      className={`inline-flex items-center rounded-md border transition-colors ${
                         isActive
                           ? 'bg-zinc-950 text-white border-zinc-950'
-                          : 'bg-white text-zinc-700 border-zinc-200 hover:border-zinc-400 hover:text-zinc-950'
+                          : 'bg-white text-zinc-700 border-zinc-200 hover:border-zinc-400'
                       }`}
                     >
-                      {charVoice.name}
-                    </button>
+                      <button
+                        type="button"
+                        title={charVoice.summary}
+                        onClick={() => {
+                          setSelectedPersonaId(charVoice.id);
+                          setSelectedVoice(charVoice.baseVoice);
+                          setStyleDirection(charVoice.styleDirection);
+                        }}
+                        className="pl-2.5 pr-1.5 py-1 text-xs font-medium whitespace-nowrap"
+                      >
+                        {charVoice.name}
+                      </button>
+                      <button
+                        type="button"
+                        title={`Remove ${charVoice.name}`}
+                        onClick={() => {
+                          setCustomPersonas((prev) => prev.filter((p) => p.id !== charVoice.id));
+                          if (selectedPersonaId === charVoice.id) {
+                            setSelectedPersonaId(null);
+                          }
+                        }}
+                        className={`pr-2 pl-0.5 py-1 text-xs transition-colors ${
+                          isActive
+                            ? 'text-zinc-300 hover:text-white'
+                            : 'text-zinc-400 hover:text-red-600'
+                        }`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
                   );
                 })}
+                <button
+                  type="button"
+                  onClick={() => setShowCharacterLibrary((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-zinc-950 bg-zinc-200/70 hover:bg-zinc-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>{showCharacterLibrary ? 'Hide Character Library' : 'Add Character Voices'}</span>
+                </button>
               </div>
               <button
                 type="button"
@@ -833,6 +872,184 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 Open Full Story Cast (Multi-Speaker)
               </button>
             </div>
+
+            {showCharacterLibrary && (
+              <div className="pt-3 border-t border-zinc-200 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-semibold text-zinc-950">
+                      Character Voice Library — Add only the characters you need
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      Pre-designed Bangla character voices + custom character builder
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomPersonas((prev) => {
+                          const existing = new Set(prev.map((p) => p.id));
+                          const extras = CHARACTER_VOICE_CATALOG.filter((c) => !existing.has(c.id));
+                          return [...prev, ...extras];
+                        });
+                      }}
+                      className="px-2.5 py-1 text-xs font-medium text-zinc-700 bg-white border border-zinc-200 hover:border-zinc-400 rounded-md transition-colors whitespace-nowrap"
+                    >
+                      Add All 16 Characters
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowCharacterLibrary(false)}
+                      className="px-2.5 py-1 text-xs font-medium text-zinc-600 hover:text-zinc-950"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+
+                {/* Custom Character Builder */}
+                <div className="p-3 bg-white border border-zinc-200 rounded-lg space-y-2.5">
+                  <p className="text-xs font-semibold text-zinc-900">
+                    + Add Custom Character Voice
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                    <input
+                      type="text"
+                      value={customCharName}
+                      onChange={(e) => setCustomCharName(e.target.value)}
+                      placeholder="Character name (e.g. টিয়া)"
+                      className="px-2.5 py-1.5 text-xs bg-[#FAFAFA] border border-zinc-200 rounded-md text-zinc-950 focus:bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                    />
+                    <input
+                      type="text"
+                      value={customCharRole}
+                      onChange={(e) => setCustomCharRole(e.target.value)}
+                      placeholder="Age / Intro (e.g. ৬ বছর · ছোট বোন)"
+                      className="px-2.5 py-1.5 text-xs bg-[#FAFAFA] border border-zinc-200 rounded-md text-zinc-950 focus:bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                    />
+                    <select
+                      value={customCharVoice}
+                      onChange={(e) => setCustomCharVoice(e.target.value as VoiceName)}
+                      aria-label="Custom character base voice"
+                      className="px-2.5 py-1.5 text-xs bg-[#FAFAFA] border border-zinc-200 rounded-md text-zinc-950 focus:bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                    >
+                      {STUDIO_VOICES.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name} ({v.gender})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      value={customCharStyle}
+                      onChange={(e) => setCustomCharStyle(e.target.value)}
+                      placeholder="Voice style (e.g. Sweet cheerful girl)"
+                      className="px-2.5 py-1.5 text-xs bg-[#FAFAFA] border border-zinc-200 rounded-md text-zinc-950 focus:bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900"
+                    />
+                    <button
+                      type="button"
+                      disabled={!customCharName.trim()}
+                      onClick={() => {
+                        const cleanName = customCharName.trim();
+                        if (!cleanName) return;
+                        const newChar: CustomVoicePersona = {
+                          id: `custom-char-${Date.now()}`,
+                          name: customCharRole.trim()
+                            ? `${cleanName} (${customCharRole.trim()})`
+                            : cleanName,
+                          baseVoice: customCharVoice,
+                          styleDirection:
+                            customCharStyle.trim() ||
+                            `Natural expressive Bengali character voice for ${cleanName}`,
+                          summary: customCharRole.trim() || 'Custom story character',
+                          createdAt: Date.now(),
+                        };
+                        setCustomPersonas((prev) => [newChar, ...prev]);
+                        setSelectedPersonaId(newChar.id);
+                        setSelectedVoice(newChar.baseVoice);
+                        setStyleDirection(newChar.styleDirection);
+                        setCustomCharName('');
+                        setCustomCharRole('');
+                        setCustomCharStyle('');
+                      }}
+                      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 rounded-md transition-colors whitespace-nowrap"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add Character</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Catalog Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                  {CHARACTER_VOICE_CATALOG.map((charItem) => {
+                    const isAdded = customPersonas.some((p) => p.id === charItem.id);
+                    const isSelected = selectedPersonaId === charItem.id;
+                    return (
+                      <div
+                        key={charItem.id}
+                        className={`p-3 rounded-lg border bg-white flex flex-col justify-between gap-2.5 ${
+                          isSelected ? 'border-zinc-950' : 'border-zinc-200'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-start justify-between gap-1.5">
+                            <p className="text-xs font-semibold text-zinc-950 leading-snug">
+                              {charItem.name}
+                            </p>
+                            <span className="text-[11px] font-mono text-zinc-500 shrink-0">
+                              {charItem.baseVoice} · {getVoiceGender(charItem.baseVoice)}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-zinc-600 mt-1 leading-snug">
+                            {charItem.summary}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-100">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomPersonas((prev) =>
+                                prev.some((p) => p.id === charItem.id)
+                                  ? prev.filter((p) => p.id !== charItem.id)
+                                  : [charItem, ...prev]
+                              );
+                              if (isAdded && selectedPersonaId === charItem.id) {
+                                setSelectedPersonaId(null);
+                              }
+                            }}
+                            className={`flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 text-[11px] font-medium rounded border transition-colors ${
+                              isAdded
+                                ? 'bg-zinc-950 text-white border-zinc-950'
+                                : 'bg-white text-zinc-700 border-zinc-200 hover:border-zinc-400'
+                            }`}
+                          >
+                            {isAdded ? <Check className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                            <span>{isAdded ? 'Added' : 'Add'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomPersonas((prev) =>
+                                prev.some((p) => p.id === charItem.id) ? prev : [charItem, ...prev]
+                              );
+                              setSelectedPersonaId(charItem.id);
+                              setSelectedVoice(charItem.baseVoice);
+                              setStyleDirection(charItem.styleDirection);
+                            }}
+                            className="px-2.5 py-1 text-[11px] font-medium text-zinc-800 bg-zinc-100 hover:bg-zinc-200 rounded transition-colors"
+                          >
+                            Use
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ElevenLabs Split Speech Synthesis Layout: Main Editor (8 cols) + Right Settings Inspector (4 cols) */}
@@ -1140,7 +1357,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   }}
                   className="px-2.5 py-1.5 text-xs font-medium text-zinc-950 bg-white border border-zinc-300 hover:border-zinc-950 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
-                  Bangla Story (রিমি ও তুলতুল)
+                  Bangla Story (রিমঝিম ও তুলতুল)
                 </button>
                 <button
                   type="button"
@@ -1165,15 +1382,107 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => setShowCastLibrary((v) => !v)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-950 bg-zinc-200/80 hover:bg-zinc-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{showCastLibrary ? 'Hide Character Library' : 'Add Character Voices'}</span>
+                </button>
+                <button
+                  type="button"
                   onClick={addSpeaker}
                   disabled={speakers.length >= 10}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-zinc-950 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Add Speaker</span>
+                  <span>Add Blank Speaker</span>
                 </button>
               </div>
             </div>
+
+            {showCastLibrary && (
+              <div className="p-4 bg-white border border-zinc-200 rounded-lg space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-semibold text-zinc-950">
+                      Pick Characters to Add to Cast ({speakers.length}/10)
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      Click any character below to add or remove them from this Multi-Speaker scene
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowCastLibrary(false)}
+                    className="text-xs font-medium text-zinc-600 hover:text-zinc-950"
+                  >
+                    Done
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                  {Array.from(
+                    new Map(
+                      [...CHARACTER_VOICE_CATALOG, ...customPersonas].map((c) => [c.id, c])
+                    ).values()
+                  ).map((charItem) => {
+                    const shortName = charItem.name.split(' (')[0].trim();
+                    const inCast = speakers.some(
+                      (s) => s.name.trim() === shortName || s.name.trim() === charItem.name
+                    );
+                    return (
+                      <button
+                        key={charItem.id}
+                        type="button"
+                        disabled={!inCast && speakers.length >= 10}
+                        onClick={() => {
+                          if (inCast) {
+                            if (speakers.length <= 2) return;
+                            const target = speakers.find(
+                              (s) => s.name.trim() === shortName || s.name.trim() === charItem.name
+                            );
+                            if (target?.id) removeSpeaker(target.id);
+                          } else {
+                            setSpeakers((prev) => [
+                              ...prev,
+                              {
+                                id: `spk-lib-${charItem.id}-${Date.now()}`,
+                                name: shortName,
+                                voiceName: charItem.baseVoice,
+                                style: charItem.styleDirection,
+                              },
+                            ]);
+                          }
+                        }}
+                        className={`p-2.5 text-left rounded-lg border transition-colors flex items-start justify-between gap-2 disabled:opacity-40 ${
+                          inCast
+                            ? 'bg-zinc-950 text-white border-zinc-950'
+                            : 'bg-[#FAFAFA] text-zinc-900 border-zinc-200 hover:border-zinc-400'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold truncate">{shortName}</p>
+                          <p
+                            className={`text-[11px] truncate ${
+                              inCast ? 'text-zinc-300' : 'text-zinc-500'
+                            }`}
+                          >
+                            {charItem.summary}
+                          </p>
+                        </div>
+                        <span className="shrink-0 mt-0.5">
+                          {inCast ? (
+                            <Check className="w-3.5 h-3.5" />
+                          ) : (
+                            <Plus className="w-3.5 h-3.5" />
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
               {speakers.map((spk, idx) => (
@@ -1344,7 +1653,7 @@ export const VoiceStudio: React.FC<VoiceStudioProps> = ({
                   rows={7}
                   value={rawScreenplayDraft}
                   onChange={(e) => setRawScreenplayDraft(e.target.value)}
-                  placeholder="[দৃশ্য ১]&#10;[ন্যারেটর]:&#10;[curious] রিমি চিৎকার করল না।"
+                  placeholder="[দৃশ্য ১]&#10;[ন্যারেটর]:&#10;[curious] রিমঝিম চিৎকার করল না।"
                   className="w-full p-3 text-xs leading-relaxed bg-[#FAFAFA] border border-zinc-200 rounded-lg text-zinc-950 focus:bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900 resize-y"
                 />
               </div>
