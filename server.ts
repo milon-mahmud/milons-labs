@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import http from 'node:http';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -555,6 +556,164 @@ async function startServer() {
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true });
+  });
+
+  // Short-lived in-memory files generated for the ChatGPT integration.
+  const integrationFiles = new Map<string, { buffer: Buffer; mimeType: string; filename: string; expiresAt: number }>();
+  const integrationFileTtlMs = 30 * 60 * 1000;
+
+  function isValidIntegrationToken(req: Request): boolean {
+    const expected = process.env.CHATGPT_API_TOKEN || '';
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\\s+/i, '').trim();
+    if (!expected || !supplied) return false;
+    const expectedBuffer = Buffer.from(expected);
+    const suppliedBuffer = Buffer.from(supplied);
+    return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
+  }
+
+  app.post('/api/integrations/chatgpt/voice-srt', async (req: Request, res: Response) => {
+    if (!process.env.CHATGPT_API_TOKEN) {
+      res.status(503).json({ error: 'ChatGPT integration is not configured. Set CHATGPT_API_TOKEN on the server.' });
+      return;
+    }
+    if (!isValidIntegrationToken(req)) {
+      res.status(401).json({ error: 'Unauthorized. Provide a valid Bearer token.' });
+      return;
+    }
+
+    try {
+      const script = String(req.body.script || req.body.text || '').trim();
+      const voiceName = String(req.body.voiceName || 'Kore').trim();
+      const style = String(req.body.style || 'Warm, natural Bengali storytelling with clear pronunciation').trim();
+      if (!script) {
+        res.status(400).json({ error: 'script is required.' });
+        return;
+      }
+      if (script.length > 12000) {
+        res.status(413).json({ error: 'Script is too long. Maximum length is 12000 characters.' });
+        return;
+      }
+      const allowedVoices = new Set(['Kore', 'Zephyr', 'Puck', 'Charon', 'Fenrir']);
+      if (!allowedVoices.has(voiceName)) {
+        res.status(400).json({ error: 'voiceName must be Kore, Zephyr, Puck, Charon, or Fenrir.' });
+        return;
+      }
+
+      const { model, allowQuotaFallback } = resolveTtsModelSelection(req.body);
+      const chunks = splitScriptIntoChunks(script, 2200);
+      const wavParts: Buffer[] = [];
+      let modelUsed = model;
+      for (let i = 0; i < chunks.length; i++) {
+        const clip = await synthesizeSingleClip({
+          model,
+          allowQuotaFallback,
+          text: chunks[i],
+          voiceName,
+          style,
+        });
+        wavParts.push(clip.wav);
+        modelUsed = clip.modelUsed;
+        if (i < chunks.length - 1) await sleep(250);
+      }
+      const wav = wavParts.length === 1 ? wavParts[0] : mergeWavBuffers(wavParts, 140);
+
+      const srtResponse = await runWithKeyRotation((ai) =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: {
+            parts: [
+              { inlineData: { mimeType: 'audio/wav', data: wav.toString('base64') } },
+              { text: 'Transcribe this audio into tightly synchronized Bengali subtitle cues. Keep the exact original spoken language. Split speech into natural subtitle segments of roughly 42 characters max per cue. Ensure startSeconds and endSeconds are accurate and strictly increasing.' },
+            ],
+          },
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                detectedLanguage: { type: Type.STRING },
+                cues: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      startSeconds: { type: Type.NUMBER },
+                      endSeconds: { type: Type.NUMBER },
+                      text: { type: Type.STRING },
+                    },
+                    required: ['startSeconds', 'endSeconds', 'text'],
+                  },
+                },
+              },
+              required: ['cues'],
+            },
+          },
+        })
+      );
+      const parsed = JSON.parse((srtResponse.text ?? '{}').trim()) as {
+        detectedLanguage?: string;
+        cues?: Array<{ startSeconds: number; endSeconds: number; text: string }>;
+      };
+      const cues: SrtCue[] = (Array.isArray(parsed.cues) ? parsed.cues : [])
+        .filter((cue) => cue && typeof cue.text === 'string' && cue.text.trim())
+        .map((cue, index) => {
+          const start = Math.max(0, Number(cue.startSeconds) || 0);
+          const end = Math.max(start + 0.25, Number(cue.endSeconds) || start + 1.5);
+          return {
+            id: index + 1,
+            startTime: secondsToSrtTimestamp(start),
+            endTime: secondsToSrtTimestamp(end),
+            startSeconds: start,
+            endSeconds: end,
+            text: cue.text.trim(),
+          };
+        });
+      if (!cues.length) {
+        res.status(422).json({ error: 'Voice was generated, but no subtitle cues were returned.' });
+        return;
+      }
+
+      const now = Date.now();
+      for (const [id, file] of integrationFiles) {
+        if (file.expiresAt <= now) integrationFiles.delete(id);
+      }
+      const expiresAt = new Date(now + integrationFileTtlMs).toISOString();
+      const audioId = randomUUID();
+      const srtId = randomUUID();
+      integrationFiles.set(audioId, { buffer: wav, mimeType: 'audio/wav', filename: 'milons-labs-voice.wav', expiresAt: now + integrationFileTtlMs });
+      integrationFiles.set(srtId, { buffer: Buffer.from(buildSrtString(cues), 'utf8'), mimeType: 'application/x-subrip; charset=utf-8', filename: 'milons-labs-subtitles.srt', expiresAt: now + integrationFileTtlMs });
+      const baseUrl = String(process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\\/+$/, '');
+      res.json({
+        success: true,
+        audioUrl: `${baseUrl}/api/integrations/download/${audioId}`,
+        srtUrl: `${baseUrl}/api/integrations/download/${srtId}`,
+        detectedLanguage: parsed.detectedLanguage || 'Auto-detected',
+        cueCount: cues.length,
+        cues,
+        modelUsed,
+        srtModelUsed: 'gemini-4-hydrogen',
+        expiresAt,
+        note: 'Download links expire after 30 minutes. Files are held temporarily in server memory.',
+      });
+    } catch (err) {
+      const { status, message } = extractApiErrorMessage(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // UUID download links act as temporary, unguessable capabilities; no API token is exposed in URLs.
+  app.get('/api/integrations/download/:id', (req: Request, res: Response) => {
+    const file = integrationFiles.get(String(req.params.id || ''));
+    if (!file || file.expiresAt <= Date.now()) {
+      integrationFiles.delete(String(req.params.id || ''));
+      res.status(404).json({ error: 'This download link is invalid or has expired. Generate the files again.' });
+      return;
+    }
+    res.setHeader('Content-Type', file.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(file.buffer);
   });
 
   // Fast Single-Pass Audio -> SRT Subtitle Generator
