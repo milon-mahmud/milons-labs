@@ -1,0 +1,80 @@
+openapi: 3.1.0
+info:
+  title: Milons Labs ChatGPT Voice and SRT API
+  version: 1.0.0
+  description: Generate Bengali voice audio and synchronized SRT subtitles from a script.
+servers:
+  - url: https://milons-labs-tht3.onrender.com
+security:
+  - BearerAuth: []
+paths:
+  /api/integrations/chatgpt/voice-srt:
+    post:
+      operationId: generateVoiceAndSrt
+      summary: Generate voice audio and synchronized SRT subtitles
+      description: Creates a WAV voice file and an SRT subtitle file. Returned download links expire after 30 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script]
+              properties:
+                script:
+                  type: string
+                  minLength: 1
+                  maxLength: 12000
+                  description: The complete narration or voice script.
+                voiceName:
+                  type: string
+                  enum: [Kore, Zephyr, Puck, Charon, Fenrir]
+                  default: Kore
+                style:
+                  type: string
+                  default: Warm, natural Bengali storytelling with clear pronunciation
+                ttsModel:
+                  type: string
+                  enum: [auto, gemini-3.8-flash-tts, gemini-3.8-flash-lite-tts, gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts]
+                  default: auto
+      responses:
+        '200':
+          description: Voice and subtitle files generated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, audioUrl, srtUrl, cueCount, expiresAt]
+                properties:
+                  success: { type: boolean }
+                  audioUrl: { type: string, format: uri }
+                  srtUrl: { type: string, format: uri }
+                  detectedLanguage: { type: string }
+                  cueCount: { type: integer }
+                  cues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        startTime: { type: string }
+                        endTime: { type: string }
+                        startSeconds: { type: number }
+                        endSeconds: { type: number }
+                        text: { type: string }
+                  modelUsed: { type: string }
+                  srtModelUsed: { type: string }
+                  expiresAt: { type: string, format: date-time }
+                  note: { type: string }
+        '400': { description: Invalid request. }
+        '401': { description: Missing or invalid bearer token. }
+        '413': { description: Script exceeds the maximum length. }
+        '422': { description: Audio was generated but subtitles could not be created. }
+        '503': { description: Server integration token is not configured. }
+        '500': { description: Generation failed. }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
