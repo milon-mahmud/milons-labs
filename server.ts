@@ -602,7 +602,7 @@ async function startServer() {
       const { model, allowQuotaFallback } = resolveTtsModelSelection(req.body);
       const chunks = splitScriptIntoChunks(script, 2200);
       const wavParts: Buffer[] = [];
-      let modelUsed = model;
+      let modelUsed: string = model;
       for (let i = 0; i < chunks.length; i++) {
         const clip = await synthesizeSingleClip({
           model,
